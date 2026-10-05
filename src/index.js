@@ -381,6 +381,58 @@ registry.register('hermes.model_set', async ({ model, session_id, once = false }
   });
 });
 
+// ── hermes.favorites (creator curated models) ───────────────────
+registry.register('hermes.favorites', async () => {
+  const h = getHermesState();
+  if (!h.found || !h.port) throw new Error('Hermes not discovered on this host');
+
+  // Static baseline from Creator's favorites + dynamic active check
+  const curated = [
+    {
+      id: 'antigravity/gemini-3.8-flash-high',
+      name: 'Gemini 3.8 Flash High',
+      provider: 'kasrai',
+      badge: 'HIGH',
+      role: 'fast_agentic',
+      desc: 'Основная быстрая рабочая лошадка с контекстом 1M токенов'
+    },
+    {
+      id: 'antigravity/claude-opus-4-6-thinking',
+      alias: 'claude-opus-4-6-thinking',
+      name: 'Opus 4.6 Thinking',
+      provider: 'kasrai',
+      badge: 'THINKING + HIGH',
+      role: 'deep_reasoning',
+      desc: 'Тяжелый супер-мозг для сложнейшей логики и разбора багов'
+    },
+    {
+      id: 'antigravity/gemini-3.8-flash-tiered',
+      alias: 'gemini-3.8-flash-tiered',
+      name: 'Gemini 3.8 Flash Tiered',
+      provider: 'kasrai',
+      badge: 'TIERED',
+      role: 'balanced',
+      desc: 'Сбалансированный режим рассуждений Flash'
+    },
+    {
+      id: 'antigravity/claude-sonnet-4-6',
+      alias: 'claude-sonnet-4-6',
+      name: 'Sonnet 4.6',
+      provider: 'kasrai',
+      badge: 'CODING',
+      role: 'coding',
+      desc: 'Топовый кодинг и агентная разработка'
+    }
+  ];
+
+  return {
+    ok: true,
+    favorites: curated,
+    count: curated.length,
+    active_model: 'antigravity/gemini-3.8-flash-high'
+  };
+});
+
 // ── hermes.send ─────────────────────────────────────────────────
 registry.register('hermes.send', async ({ session_id, prompt }) => {
   const h = getHermesState();

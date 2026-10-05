@@ -164,4 +164,8 @@
   - `cwd` (рабочая папка проекта);
   - `is_active` (активен ли прямо сейчас в GUI);
   - `last_active` / `updated_at`.
+* **`device.hermes_model()`** — возвращает текущую модель, провайдер и контекстное окно сессии.
+* **`device.hermes_favorites()`** — возвращает золотой список избранных моделей Создателя (Gemini 3.8 Flash High, Opus 4.6 Thinking, Gemini 3.8 Flash Tiered, Sonnet 4.6) с бейджами и ролями под задачи.
+* **`device.hermes_models(provider='KasRAI')`** — полный каталог моделей провайдера из шлюза.
+* **`device.hermes_model_set(model, once=False, session_id=None)`** — переключение модели (постоянное или одноразовое на 1 ход через `--once`).
 * **`device.hermes_send(chatid, prompt)`** — отправляет промпт с маркером `[Dirom Reqwest]` в выбранный `session_id` через `prompt.submit` и возвращает результат генерации.
