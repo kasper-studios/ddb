@@ -2,62 +2,101 @@
 
 > **Авторы концепта:** Kasperenok & Dirom (Архитекторы)  
 > **Исполнитель реализации:** Hermes (Инженер-Реализатор)  
-> **Статус:** v1.3.0-GENERIC-ACTION-RPC  
+> **Статус:** v1.4.0-CRASH-SHIELD-DEFENSE  
 > **Лицензия:** MIT / Суверенная Цитадель  
 
 ---
 
-## 1. Фундаментальный Принцип: Supervisor-Centric API & Generic Action RPC
+## 1. Фундаментальный Принцип: Crash Shield & Неубиваемый Шелл
 
-Никаких захардкоженных дублирующихся эндпоинтов вроде `/api/screen`, `/api/audio/play`, `/api/fs/read`!
-Архитектура DDB строится на **Едином Универсальном Диспетчере Действий (Generic Action RPC Protocol)**:
+Шелл Супервайзера (`:8790`) спроектирован так, чтобы он **ФИЗИЧЕСКИ НЕ МОГ УМЕРЕТЬ НИ ПРИ КАКИХ ОБСТОЯТЕЛЬСТВАХ**.
+Это последняя, непробиваемая цитадель обороны хоста (Crash Shield):
 
 ```
-                          ┌───────────────────────────┐
-                          │   DIROM (Планшет / Агент) │
-                          └─────────────┬─────────────┘
-                                        │ POST /api/v1/action
-                                        │ {"action": "screen_capture", "params": {...}}
-                                        ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                    DDB SUPERVISOR RUNTIME (Порт :8790)                       │
-│                         [Главный Служебный Сервер]                           │
+│                        «КРАШ-ШИЛД» (CRASH SHIELD)                            │
 │                                                                              │
-│  - Единая точка входа API для Дирома                                         │
-│  - Ультра-легковесный, неубиваемый демон автозагрузки (systemd)              │
-│  - Эндпоинты:                                                                │
-│      * GET  /api/v1/status  ➔ моментальный Heartbeat из памяти (15 мс)       │
-│      * POST /api/v1/action  ➔ Generic RPC вход! Проксирует в Bridge по WS   │
-│      * GET  /ws/events      ➔ стрим реалтайм-событий (Niri, Notifications)   │
-│  - Watchdog & Keep-Alive воркера Bridge                                      │
-│  - Аварийный Fallback: если Bridge упал/завис, экстренные базовые действия   │
-│    ('exec', 'reboot', 'kill', 'restart_bridge') Супервайзер исполняет САМ!   │
+│  - Написан на ультра-сыром, минималистичном node:http (< 80 строк кода)     │
+│  - 0 внешних npm-зависимостей! Никаких express, ws или тяжелых библиотек!    │
+│  - Не использует динамическую память и сложные структуры (иммунитет к OOM)   │
+│  - Перехватывает uncaughtException и unhandledRejection на глобальном уровне  │
+│  - Защищённый эндпоинт аварийного шелла: POST /api/v1/action ('shell_exec')  │
+│  - ВСЕГДА отвечает, даже если вся графическая сессия или Wayland крашнулись! │
 └───────────────────────┬──────────────────────────────▲───────────────────────┘
                         │                              │
-         IPC WebSocket  │ 1. {"id": 1, "action": "..."}│ 2. Heartbeat Telemetry &
-         (ws://127.0.0.1)│    Проксирование в шелл     │    RPC Response
+         IPC WebSocket  │ 1. Проксирование экшенов     │ 2. Heartbeat Telemetry &
+         (ws://127.0.0.1)│    в рабочую сессию          │    BlackBox Post-Mortem
                         ▼                              │
 ┌──────────────────────────────────────────────────────┴───────────────────────┐
 │                      DDB MAIN BRIDGE (Внутренний Воркер)                     │
 │                        [Рабочий Адаптер Системы]                             │
 │                                                                              │
-│  - Запускается и контролируется Супервайзером                                │
-│  - Подключен к графическому и звуковому окружению пользователя (Wayland/Niri)│
-│  - Содержит таблицу зарегистрированных экшенов (Action Registry Map)         │
-│  - Если запрошенный action не поддерживается хостом (например screen на VPS) │
-│    или неизвестен ➔ Bridge сам возвращает:                                   │
-│    {"ok": false, "error": "ACTION_NOT_SUPPORTED", "action": "..."}          │
-│  - Эмитит непрерывный Heartbeat со своей телеметрией в Супервайзер           │
+│  - Богатый функционал (Niri, Wayland, PipeWire, Screen, Audio, FS)           │
+│  - Может быть подвержен сбоям ОС, падениям композитора или тяжелым нагрузкам │
+│  - Непрерывно пишет свой стейт в кольцевой буфер Черного Ящика (BlackBox)    │
+│  - При падении: Супервайзер перехватывает код завершения, сигнал (SIGSEGV/   │
+│    SIGKILL), стек ошибки и фиксирует время даунтайма в журнал крушений       │
 └──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Защитные принципы Краш-Шилда:
+1. **Zero External Dependencies:** Супервайзер использует строго стандартную библиотеку Node.js (`node:http`, `node:child_process`, `node:fs`). Никакой баг в `node_modules` не может его сломать.
+2. **Изоляция сбоев:** Смерть Bridge (например, падение PipeWire или краш Niri) никак не задевает сокет Супервайзера.
+3. **Прямой системный Fallback:** Если Bridge мёртв, `shell_exec` исполняется напрямую встроенным `node:child_process.spawn('/bin/bash')`. Связь с машиной гарантирована на 100%.
+
+---
+
+## 2. Посмертная Диагностика (Post-Mortem Diagnostics & Черный Ящик)
+
+Супервайзер ведет журнал крушений в оперативной памяти и локальном файле `~/.config/ddb/crash_report.json`.
+
+При падении Bridge Супервайзер фиксирует:
+1. **Точный таймштамп аварии** и причину (код выхода `exitCode`, сигнал `SIGKILL`, `SIGSEGV`, `OOM`);
+2. **Секундомер даунтайма** (`downtime_sec` — сколько секунд воркер находится в оффлайне);
+3. **Последние 50 строк stderr/stdout** перед смертью (BlackBox ring-buffer);
+4. **Статус целостности системы (Damage Assessment):**
+   * Доступен ли Wayland сокет (`/run/user/1000/niri*.sock`);
+   * Жив ли PipeWire;
+   * Хватает ли оперативной памяти на хосте;
+5. **Вердикт авто-восстановления:** возможно ли безопасно поднять Bridge, или требуется ручное вмешательство через аварийный шелл.
+
+### JSON-срез диагностики (`GET /api/v1/diagnostics` или `device.status`):
+```json
+{
+  "host": "ponosik",
+  "shield_status": "ARMED_AND_ACTIVE",
+  "bridge_state": "CRASHED",
+  "downtime_sec": 42,
+  "crash_report": {
+    "crashed_at": "2026-10-05T17:05:12.100Z",
+    "exit_code": 137,
+    "signal": "SIGKILL",
+    "reason": "OOM_KILLED",
+    "last_error": "FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory",
+    "recent_stderr_tail": [
+      "[BRIDGE] Processing huge file...",
+      "<--- Last few GCs --->",
+      "[BRIDGE] FATAL ERROR: Reached heap limit"
+    ]
+  },
+  "damage_assessment": {
+    "niri_socket_available": true,
+    "pipewire_available": true,
+    "free_ram_mb": 11400,
+    "can_auto_recover": true
+  },
+  "recovery_action": "RESTART_AVAILABLE"
+}
 ```
 
 ---
 
-## 2. Спецификация Generic Action RPC (`POST /api/v1/action`)
+## 3. Спецификация Generic Action RPC (`POST /api/v1/action`)
 
-Все операции (от выполнения bash-команд до захвата экрана и музыки) передаются через единый формат:
+Все операции передаются через единый формат:
 
-### 2.1. Формат Запроса (Request):
+### 3.1. Формат Запроса (Request):
 ```json
 {
   "action": "screen_capture",
@@ -69,7 +108,7 @@
 }
 ```
 
-### 2.2. Формат Успешного Ответа (Success Response):
+### 3.2. Формат Успешного Ответа:
 ```json
 {
   "ok": true,
@@ -84,121 +123,61 @@
 }
 ```
 
-### 2.3. Формат Ошибки Неподдерживаемого Действия (Action Not Supported):
-Если на безголовой VPS запросили скриншот или Niri, либо экшен опечатан:
+### 3.3. Формат Ошибки Неподдерживаемого Действия:
 ```json
 {
   "ok": false,
   "action": "screen_capture",
   "error": "ACTION_NOT_SUPPORTED",
-  "message": "Display capability is disabled or unavailable on this host (headless environment)",
+  "message": "Display capability is disabled or unavailable on this host",
   "available_actions": [
-    "shell_exec",
-    "fs_read",
-    "fs_write",
-    "fs_list",
-    "fs_delete",
-    "audio_play",
-    "mic_capture",
-    "niri_focus",
-    "window_list"
+    "shell_exec", "fs_read", "fs_write", "fs_list", "diagnostics"
   ]
 }
 ```
 
 ---
 
-## 3. Таблица Базовых Экшенов (Standard Action Registry)
+## 4. Таблица Базовых Экшенов (Standard Action Registry)
 
-Каждый адаптер в Bridge просто регистрирует свои обработчики в реестр:
-`registry.register('shell_exec', handleShellExec)`
-
-| Action | Назначение | Параметры | Окружение |
+| Action | Назначение | Параметры | Исполнитель при сбое Bridge |
 | :--- | :--- | :--- | :--- |
-| **`shell_exec`** | Выполнение команды с выводом | `{"command": "...", "cwd": "...", "timeout_ms": 30000}` | Все хосты |
-| **`fs_read`** | Чтение файла с пагинацией | `{"path": "...", "offset": 1, "limit": 200}` | Все хосты |
-| **`fs_write`** | Атомарная запись файла | `{"path": "...", "content": "..."}` | Все хосты |
-| **`fs_list`** | Список файлов и директорий | `{"path": "...", "recursive": false}` | Все хосты |
-| **`screen_capture`**| Мгновенный скриншот в память | `{"quality": 80, "format": "jpeg"}` | Только Desktop / Wayland |
-| **`window_list`** | Список окон и их координаты | `{}` | Только Niri / Wayland |
-| **`niri_action`** | Команда Niri IPC (`focus-window`, etc) | `{"msg": ["action", "focus-workspace", "1"]}` | Только Niri |
-| **`audio_play`** | Воспроизведение звука в динамики | `{"url_or_path": "...", "volume": 1.0}` | PipeWire / ALSA |
-| **`mic_capture`** | Захват отрезка аудио с микрофона | `{"duration_sec": 5, "format": "wav"}` | PipeWire / ALSA |
-| **`system_reboot`**| Перезагрузка хоста | `{"delay_sec": 1}` | Все хосты (Fallback) |
-
-Если модуль (например `screen`) не загрузился при старте из-за отсутствия Wayland — он просто **не попадает в реестр экшенов**. При попытке его вызвать Bridge мгновенно возвращает чистый `ACTION_NOT_SUPPORTED` с кодом 404/400 без крашей!
-
----
-
-## 4. Heartbeat Telemetry & `device.status(name)`
-
-Bridge непрерывно (каждые 2-4 секунды) эмитит в Супервайзер телеметрический пакет `heartbeat`:
-```json
-{
-  "bridge_online": true,
-  "bridge_uptime_sec": 4210,
-  "system": {
-    "hostname": "ponosik",
-    "cpu_load_percent": 12.5,
-    "memory_used_mb": 4120,
-    "memory_total_mb": 15820,
-    "battery_percent": 84,
-    "is_charging": true,
-    "temp_c": 46.2
-  },
-  "capabilities": {
-    "display": true,
-    "audio": true,
-    "mic": true,
-    "niri": true
-  },
-  "state": {
-    "active_window": {
-      "app_id": "firefox",
-      "title": "YouTube - Mozilla Firefox"
-    },
-    "now_playing": {
-      "player": "spotify",
-      "title": "Клубим (KAKYN REMIX)",
-      "artist": "5opka, MellSher"
-    }
-  },
-  "supported_actions": [
-    "shell_exec", "fs_read", "fs_write", "fs_list",
-    "screen_capture", "window_list", "niri_action",
-    "audio_play", "mic_capture"
-  ]
-}
-```
-
-Супервайзер держит этот объект в памяти на порту `:8790` (`GET /api/v1/status`), отдавая его агенту за **10-15 миллисекунд** без опроса ОС!
+| **`shell_exec`** | Запуск команды в bash | `{"command": "...", "cwd": "...", "timeout_ms": 30000}` | **Супервайзер (Fallback)** |
+| **`diagnostics`** | Посмертная диагностика и аудит сбоя | `{}` | **Супервайзер (Нативно)** |
+| **`bridge_restart`**| Принудительный перезапуск воркера | `{}` | **Супервайзер (Нативно)** |
+| **`fs_read`** | Чтение файла с пагинацией | `{"path": "...", "offset": 1, "limit": 200}` | **Супервайзер (Fallback)** |
+| **`fs_write`** | Атомарная запись файла | `{"path": "...", "content": "..."}` | **Супервайзер (Fallback)** |
+| **`fs_list`** | Список файлов и директорий | `{"path": "...", "recursive": false}` | **Супервайзер (Fallback)** |
+| **`screen_capture`**| Скриншот экрана в память | `{"quality": 80, "format": "jpeg"}` | Только живой Bridge (Wayland) |
+| **`window_list`** | Список окон и их координаты | `{}` | Только живой Bridge (Niri) |
+| **`audio_play`** | Воспроизведение звука в динамики | `{"url_or_path": "...", "volume": 1.0}` | Только живой Bridge (PipeWire) |
+| **`mic_capture`** | Захват отрезка аудио с микрофона | `{"duration_sec": 5, "format": "wav"}` | Только живой Bridge (PipeWire) |
+| **`system_reboot`**| Перезагрузка хоста | `{"delay_sec": 1}` | **Супервайзер (Нативно)** |
 
 ---
 
 ## 5. Категория инструментов `device.*` у Дирома
 
-В ядре агента мы делаем красивый декларативный универсальный диспетчер:
+Диром получает полноценные инструменты управления и диагностики хоста:
 
-* **`device.action(name, action, params={})`** — универсальный вызов ЛЮБОГО экшена на хосте;
-* **`device.status(name)`** — мгновенный статус хоста (CPU, RAM, батарея, окно, плеер, доступные экшены);
-* **Удобные нативные алиасы:**
-  * `device.exec(cmd, name='ponosik')` ➔ `device.action(name, 'shell_exec', {'command': cmd})`
-  * `device.screen(name='ponosik')` ➔ `device.action(name, 'screen_capture')`
-  * `device.fs.read(path, name='ponosik')` ➔ `device.action(name, 'fs_read', {'path': path})`
-  * `device.audio.play(sample, name='ponosik')` ➔ `device.action(name, 'audio_play', {'url_or_path': sample})`
-  * `device.mic.listen(duration, name='ponosik')` ➔ `device.action(name, 'mic_capture', {'duration_sec': duration})`
+* **`device.status(name='ponosik')`** — живой срез состояния (онлайн/оффлайн, батарея, окно Niri, плеер, аптайм);
+* **`device.diagnostics(name='ponosik')`** — **полная диагностика краша:** когда упал, код завершения, стек ошибки, сколько секунд висит даунтайм, повреждены ли сокеты Wayland/PipeWire и можно ли поднять заново;
+* **`device.restart(name='ponosik', component='bridge|all')`** — перезапуск через Супервайзер;
+* **`device.exec(cmd, name='ponosik')`** — выполнение шелл-команд (работает ВСЕГДА, даже при мертвом Бридже через Краш-Шилд!);
+* **`device.screen(name='ponosik')`** — скриншот экрана;
+* **`device.fs.read / write / list`** — файловая система;
+* **`device.audio.play` & `device.mic.listen`** — звук и микрофон.
 
 ---
 
 ## 6. Чеклист для Гермеса (Hermes Implementation Tasks)
 
-- [ ] В `src/supervisor.js` реализовать:
-  * `GET  /api/v1/status` (отдача закэшированного Heartbeat);
-  * `POST /api/v1/action` (проксирование JSON-сообщения экшена в WebSocket Bridge и ожидание ответа по correlation ID);
-  * Аварийный Fallback: если Bridge оффлайн/таймаут и экшен `shell_exec` — исполнять локально через `node:child_process`.
-- [ ] В `src/bridge.js` реализовать:
-  * Реестр экшенов `ActionRegistry` (словарь `name -> handler(params)`);
-  * Если `action` не найден — возврат `ACTION_NOT_SUPPORTED` со списком `available_actions`;
-  * Регистрация стандартных экшенов (`shell_exec`, `fs_*`, `screen_capture`, `audio_play`, `mic_capture`, `niri_*`);
-  * Таймер отправки `heartbeat` каждые 3 секунды в Супервайзер.
-- [ ] Протестировать вызов неизвестного экшена (например `foobar`) и убедиться, что Bridge возвращает корректную ошибку без краша.
+- [ ] В `src/supervisor.js` реализовать **Crash Shield**:
+  * Слушать порт `:8790` строго на нативном `node:http` (0 зависимостей);
+  * Глобальные перехватчики `process.on('uncaughtException')` и `unhandledRejection` (процесс не падает никогда);
+  * Ведение кольцевого буфера BlackBox (последние 50 строк вывода Bridge);
+  * Детект падения дочернего процесса (`child.on('exit')`): фиксация кода выхода, сигнала и времени крушения;
+  * Реализация эндпоинта `GET /api/v1/diagnostics` (полный аудит даунтайма и проверка Niri/RAM);
+  * Аварийный fallback `shell_exec` через `node:child_process.spawn`.
+- [ ] В `src/bridge.js` реализовать стандартный ActionRegistry и отправку хартбитов.
+- [ ] Протестировать падение Бриджа по `kill -9`: убедиться, что Супервайзер на `:8790` остался жив, выдал точный отчет о крушении в `device.diagnostics` и по команде поднял Бридж обратно!
