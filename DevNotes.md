@@ -2,119 +2,132 @@
 
 > **Авторы концепта:** Kasperenok & Dirom (Архитекторы)  
 > **Исполнитель реализации:** Hermes (Инженер-Реализатор)  
-> **Статус:** v1.1.0-SUPERVISOR-RUNTIME  
+> **Статус:** v1.2.0-SUPERVISOR-CENTRIC-API  
 > **Лицензия:** MIT / Суверенная Цитадель  
 
 ---
 
-## 1. Концепция: DDB Runtime & Supervisor
+## 1. Фундаментальный Принцип Архитектуры: Supervisor-Centric API
 
-DDB эволюционирует из простого шлюза в **полноценный системный рантайм-супервайзер (DDB Runtime)**:
+В отличие от классических систем, где всё API висит в «тяжелом» приложении, в DDB архитектура вывернута наизнанку для абсолютной неубиваемости:
 
-1. **Экстренный шелл в роли Root-Супервайзера (DDB Supervisor Runtime, порт `:8790`):**
-   * Это главный служебный процесс, который прописывается в автозагрузку системы (`systemd` / `crontab` / `init`).
-   * Он ультра-легковесный, неубиваемый и автономный.
-   * **Обязанности Супервайзера:**
-     * **Watchdog / Keep-Alive:** поднимает, мониторит и при крашах моментально перезапускает основной процесс `DDB Main Bridge` (`:8780`);
-     * **Updater:** подтягивает свежие обновления DDB из Git по сигналу или вебхуку без риска окирпичить хост;
-     * **Telemetry & Health:** отдаёт легковесную телеметрию хоста (CPU, RAM, диски, Uptime), даже если основной стек завис;
-     * **Emergency Shell:** исполняет прямые экстренные команды (`reboot`, `kill`, `service restart`) при сбоях.
+```
+                          ┌───────────────────────────┐
+                          │   DIROM (Планшет / Агент) │
+                          └─────────────┬─────────────┘
+                                        │ HTTPS / WSS
+                                        │ (Cloudflare Tunnel: device.kasperstudios.xyz)
+                                        ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                    DDB SUPERVISOR RUNTIME (Порт :8790)                       │
+│                         [Главный Служебный Сервер]                           │
+│                                                                              │
+│  - Единая точка входа API для Дирома (все /api/v1/* запросы идут СЮДА!)     │
+│  - Ультра-легковесный, неубиваемый демон автозагрузки (systemd)              │
+│  - Принимает команды управления и проксирует их в DDB Bridge                 │
+│  - Собирает Heartbeat & Telemetry от Bridge                                  │
+│  - При падении или зависании Bridge сам исполняет экстренный шелл            │
+│  - Авто-апдейтер, Watchdog и сборщик мусора                                  │
+└───────────────────────┬──────────────────────────────▲───────────────────────┘
+                        │                              │
+         IPC WebSocket  │ 1. Проксирование команд      │ 2. Heartbeat Telemetry
+         (ws://127.0.0.1)│    на выполнение в шелле    │    (Niri, Pulse, FPS,
+                        │    и получение ответов       │    RAM, статус экранов)
+                        ▼                              │
+┌──────────────────────────────────────────────────────┴───────────────────────┐
+│                      DDB MAIN BRIDGE (Внутренний Воркер)                     │
+│                        [Рабочий Адаптер Системы]                             │
+│                                                                              │
+│  - Запускается и контролируется Супервайзером                                │
+│  - Подключен к графическому и звуковому окружению пользователя (Wayland/Niri)│
+│  - Исполняет шелл-команды в контексте живой сессии пользователя              │
+│  - Читает сокет эвентов Niri (niri msg -j event-stream)                      │
+│  - Захватывает кадры экрана через grim и PipeWire звук                       │
+│  - Эмитит непрерывный Heartbeat со своей телеметрией в Супервайзер           │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
 
-2. **Основной рабочий процесс (DDB Main Bridge, порт `:8780`):**
-   * Подтягивается и контролируется Супервайзером;
-   * Реализует богатый функционал: REST API, WebSocket эвент-стрим, захват экрана, Niri IPC, звук и микрофон.
-
-3. **Новая категория тулов Дирома — `device.*` (Device Tools):**
-   * Полностью заменяет старую категорию `ssh.*`;
-   * Поддерживает множественные хосты (`host='ponosik'`, `host='frankfurt'`, `host='auto'`);
-   * Прямой транспорт через DDB API (по Cloudflared туннелю или локальной сети).
+### Главные преимущества такой схемы:
+1. **API никогда не умирает:** Даже если DDB Bridge упал, завис на тяжелом билде или вылетел из-за краша Wayland — Супервайзер (`:8790`) продолжает жить, отвечать Дирому и самостоятельно рестартовать воркер!
+2. **Проксирование шелла через WebSocket:** Супервайзер пересылает команду в Bridge по локальному WebSocket IPC, Bridge мгновенно исполняет её в контексте пользовательской сессии (со всеми переменными `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`) и стримит ответ обратно чанками.
+3. **Если Bridge не отвечает на пинг:** Супервайзер перехватывает выполнение на себя через встроенный локальный `child_process` (аварийный режим), гарантируя 100% доступность!
 
 ---
 
-## 2. Архитектура Возможностей (Capability-Based)
+## 2. Heartbeat Telemetry & `device.status(name)`
 
-DDB обязан запускаться на **ЛЮБОМ** устройстве Цитадели:
-* Ноутбук `ponosik` (Arch Linux + Wayland / Niri WM + PipeWire);
-* Облачные VPS (`truemain` / Ubuntu Headless без GUI и звука);
-* Мобильные Linux-окружения (Termux / aarch64).
-
-### Флаги окружения при старте:
+Bridge непрерывно (каждые 2-5 секунд) эмитит в Супервайзер телеметрический пакет `heartbeat`:
 ```json
 {
-  "hostname": "ponosik",
-  "os": "Arch Linux 7.1.8-arch1-3",
-  "arch": "x86_64",
-  "runtime_version": "1.1.0",
+  "bridge_online": true,
+  "bridge_uptime_sec": 3842,
+  "last_ping_ms": 1,
+  "system": {
+    "hostname": "ponosik",
+    "cpu_load_percent": 14.2,
+    "memory_used_mb": 4210,
+    "memory_total_mb": 15820,
+    "battery_percent": 84,
+    "is_charging": true,
+    "temperature_c": 46.5
+  },
   "capabilities": {
-    "core": true,
     "display": true,
     "display_server": "wayland-niri",
+    "active_window": {
+      "app_id": "firefox",
+      "title": "YouTube - Mozilla Firefox",
+      "workspace": 1
+    },
     "audio_out": true,
     "audio_in": true,
     "audio_server": "pipewire",
-    "notifications": true,
-    "battery": true
+    "now_playing": {
+      "player": "spotify",
+      "status": "Playing",
+      "title": "Клубим (KAKYN REMIX)",
+      "artist": "5opka, MellSher"
+    }
   }
 }
 ```
 
+Диром вызывает инструмент **`device.status(name='ponosik')`** и моментально за 15 мс получает полный, живой срез состояния компьютера Создателя!
+
 ---
 
-## 3. Звук и Микрофон (Акустический Орган Ноутбука)
+## 3. Эндпоинты Супервайзера (`:8790`)
 
-При наличии `capabilities.audio_in` и `audio_out` DDB реализует двусторонний аудио-мост:
-
-1. **`device.audio.speak` / `device.audio.play` (Вывод в динамики):**
-   * Воспроизведение звуков и речи (Voice Micro-DSL / PCM / MP3) прямо в колонки хоста через `pw-cat -p` или `mpv`;
-2. **`device.mic.listen` / `device.mic.stream` (Микрофон хоста):**
-   * Захват входящего потока микрофона комнаты через PipeWire (`pw-cat -r` / `parec`);
-   * Режим стрима по WebSocket: передача чанков PCM (16kHz mono) в слуховой сокет Дирома (VAD + Whisper / Gemini Live) для акустического радара шагов, храпа и диалогов.
+Все внешние вызовы от Дирома идут **СТРОГО в Супервайзер**:
+* `GET  /api/v1/status` — возвращает кэшированный свежий Heartbeat от Bridge (или статус `bridge_offline: true`, если воркер упал);
+* `POST /api/v1/exec` — запуск команды (Супервайзер проксирует в Bridge по WS; при таймауте Bridge — исполняет локально аварийно);
+* `GET  /api/v1/screen` — проксирование захвата экрана (`grim -t jpeg -q 80 -`);
+* `POST /api/v1/fs/read` & `write` — чтение/запись файлов;
+* `POST /api/v1/audio/play` — отправка звука в динамики;
+* `GET  /ws/events` — внешний WebSocket для Дирома: стримит эвенты от Bridge (окна, уведомления) + системные алерты Супервайзера;
+* `POST /api/v1/supervisor/restart-bridge` — принудительный рестарт воркера;
+* `POST /api/v1/supervisor/update` — `git pull` + плавный перезапуск.
 
 ---
 
 ## 4. Категория инструментов `device.*` у Дирома
 
-Вместо старых `ssh_run`, `ssh_read_file` Диром получает нативную категорию:
-
-* **`device.exec(cmd, host='auto', timeout=30)`** — выполнение шелл-команд через DDB REST;
-* **`device.screen(host='auto')`** — захват кадра экрана (Wayland/grim) прямо в Base64 без сохранения на диск;
-* **`device.fs.read(path, offset=1, limit=200, host='auto')`** — структурированное чтение файлов с пагинацией;
-* **`device.fs.write(path, content, host='auto')`** — атомарная запись файлов;
-* **`device.fs.list(path, host='auto')`** — список файлов и папок;
-* **`device.audio.play(audio_url_or_sample, host='auto')`** — воспроизведение в динамики хоста;
-* **`device.mic.inspect(duration_sec=5, host='auto')`** — захват аудио с микрофона и мультимодальный анализ обстановки;
-* **`device.windows.list(host='auto')`** — список открытых окон и активный фокус Niri;
-* **`device.emergency.exec(cmd, host='auto')`** — прямой экстренный вызов через порт Супервайзера `:8790`.
+* **`device.status(name='ponosik')`** — моментальная телеметрия хоста, батарея, активное окно Niri, плеер;
+* **`device.exec(cmd, name='ponosik', timeout=30)`** — выполнение шелл-команд;
+* **`device.screen(name='ponosik')`** — живой скриншот экрана Wayland/Niri в base64;
+* **`device.fs.read(path, offset=1, limit=200, name='ponosik')`** — чтение файлов;
+* **`device.fs.write(path, content, name='ponosik')`** — запись файлов;
+* **`device.audio.play(url_or_sample, name='ponosik')`** — воспроизведение в динамики хоста;
+* **`device.mic.listen(duration_sec=5, name='ponosik')`** — прослушка микрофона через PipeWire;
+* **`device.restart(component='bridge|all', name='ponosik')`** — перезапуск через Супервайзер.
 
 ---
 
-## 5. Структура Репозитория
+## 5. Чеклист для Гермеса (Hermes Tasks)
 
-```
-ddb/
-├── DevNotes.md              # Настоящий операционный контракт
-├── package.json             # ESM модуль
-├── install.sh               # Инсталлятор в 1 команду
-├── src/
-│   ├── supervisor.js        # Root-рантайм (:8790): автозагрузка, watchdog, апдейтер, телеметрия
-│   ├── index.js             # DDB Main Bridge (:8780): REST API + WSS
-│   ├── capabilities.js      # Сканер железа и серверов (Niri, PipeWire, D-Bus)
-│   ├── adapters/
-│   │   ├── niri.js          # Niri IPC сокет эвентов (event-stream)
-│   │   ├── dbus.js          # D-Bus (уведомления, MPRIS)
-│   │   ├── audio.js         # PipeWire вывод и захват микрофона
-│   │   └── screen.js        # Wayland grim захват экрана
-│   └── cloudflared.js       # Менеджер туннеля *.kasperstudios.xyz
-```
-
----
-
-## 6. Задачи для Гермеса (Hermes Implementation Checklist)
-
-- [ ] Реализовать `src/supervisor.js` (:8790, встроенный `node:http`, watchdog дочернего процесса DDB Main, endpoint `/emergency/exec` и `/health`).
-- [ ] Реализовать `src/index.js` (:8780, REST + WebSocket `/ws/events`).
-- [ ] Реализовать `src/adapters/audio.js` (PipeWire play + mic stream).
-- [ ] Реализовать `src/adapters/screen.js` (быстрый grim в память).
-- [ ] Реализовать `src/adapters/niri.js` (потоковый парсинг `niri msg -j event-stream`).
-- [ ] Обновить `install.sh` для создания единого автозапуска супервайзера `ddb-supervisor.service`.
-- [ ] Протестировать запуск на ноутбуке `ponosik` и проверить порты `:8780` и `:8790`.
+- [ ] Реализовать `src/supervisor.js` как корневой HTTP+WS сервер (:8790).
+- [ ] Реализовать IPC WebSocket мост между `supervisor.js` и `bridge.js` (проксирование шелл-задач и ответов).
+- [ ] Реализовать в `bridge.js` эмиттер `heartbeat` (Niri window focus, battery, mpris, memory).
+- [ ] Реализовать аварийный fallback в `supervisor.js`: если Bridge не ответил за 3 сек — исполнять `exec` аварийным шеллом самого супервайзера.
+- [ ] Подготовить экспорт эндпоинта `/api/v1/status` под тул `device.status`.
+- [ ] Обновить автозапуск `systemd`: служба запускает только `node src/supervisor.js`.
