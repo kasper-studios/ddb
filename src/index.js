@@ -242,6 +242,145 @@ registry.register('hermes.sessions', async () => {
   });
 });
 
+// ── hermes.model (current model info) ───────────────────────────
+registry.register('hermes.model', async () => {
+  const h = getHermesState();
+  if (!h.found || !h.port) throw new Error('Hermes not discovered on this host');
+
+  return new Promise((res, rej) => {
+    const headers = {};
+    if (h.token) headers['X-Hermes-Session-Token'] = h.token;
+
+    const req = http.get(
+      `http://127.0.0.1:${h.port}/api/model/info`,
+      { headers, timeout: 5000 },
+      (resp) => {
+        let data = '';
+        resp.on('data', (c) => (data += c));
+        resp.on('end', () => {
+          try {
+            res(JSON.parse(data));
+          } catch {
+            res({ raw: data });
+          }
+        });
+      },
+    );
+    req.on('error', (e) => rej(new Error(`Hermes API error: ${e.message}`)));
+    req.on('timeout', () => { req.destroy(); rej(new Error('Hermes API timeout')); });
+  });
+});
+
+// ── hermes.models (available models catalog) ────────────────────
+registry.register('hermes.models', async ({ provider } = {}) => {
+  const h = getHermesState();
+  if (!h.found || !h.port) throw new Error('Hermes not discovered on this host');
+
+  return new Promise((res, rej) => {
+    const headers = {};
+    if (h.token) headers['X-Hermes-Session-Token'] = h.token;
+
+    const req = http.get(
+      `http://127.0.0.1:${h.port}/api/model/options`,
+      { headers, timeout: 5000 },
+      (resp) => {
+        let data = '';
+        resp.on('data', (c) => (data += c));
+        resp.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            const providers = parsed.providers || [];
+            if (provider) {
+              const matched = providers.find(
+                (p) => p.name.toLowerCase() === provider.toLowerCase() ||
+                       (p.id && p.id.toLowerCase() === provider.toLowerCase())
+              );
+              return res(matched ? { provider: matched.name, models: matched.models } : { error: 'PROVIDER_NOT_FOUND', providers: providers.map(p => p.name) });
+            }
+            res({
+              providers: providers.map((p) => ({
+                name: p.name,
+                id: p.id,
+                models_count: (p.models || []).length,
+                models: (p.models || []).slice(0, 30), // top 30 preview
+              })),
+            });
+          } catch {
+            res({ raw: data });
+          }
+        });
+      },
+    );
+    req.on('error', (e) => rej(new Error(`Hermes API error: ${e.message}`)));
+    req.on('timeout', () => { req.destroy(); rej(new Error('Hermes API timeout')); });
+  });
+});
+
+// ── hermes.model_set (switch model in session or globally) ─────
+registry.register('hermes.model_set', async ({ model, session_id, once = false }) => {
+  const h = getHermesState();
+  if (!h.found || !h.port) throw new Error('Hermes not discovered on this host');
+  if (!model) throw new Error('Missing required param: model');
+
+  const switchCmd = once ? `/model ${model} --once` : `/model ${model}`;
+
+  // Deliver via prompt.submit to the target session (or active session)
+  return new Promise((res, rej) => {
+    const tokenParam = h.token ? encodeURIComponent(h.token) : '';
+    const wsPath = `/api/ws${tokenParam ? '?token=' + tokenParam : ''}`;
+
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: h.port,
+      path: wsPath,
+      method: 'GET',
+      headers: {
+        'Connection': 'Upgrade',
+        'Upgrade': 'websocket',
+        'Sec-WebSocket-Version': '13',
+        'Sec-WebSocket-Key': Buffer.from(
+          Array.from({ length: 16 }, () => Math.floor(Math.random() * 256)),
+        ).toString('base64'),
+      },
+      timeout: 10_000,
+    });
+
+    req.on('upgrade', (_resp, socket) => {
+      const rpcPayload = JSON.stringify({
+        jsonrpc: '2.0',
+        id: Date.now(),
+        method: 'prompt.submit',
+        params: {
+          session_id: session_id || undefined,
+          text: switchCmd,
+        },
+      });
+      const payloadBuf = Buffer.from(rpcPayload, 'utf-8');
+      const frame = buildWsFrame(payloadBuf);
+      socket.write(frame);
+
+      let received = '';
+      socket.on('data', (chunk) => {
+        const parsed = parseWsFrame(chunk);
+        if (parsed) received += parsed;
+      });
+
+      setTimeout(() => {
+        socket.end();
+        try {
+          res({ ok: true, command: switchCmd, response: JSON.parse(received) });
+        } catch {
+          res({ ok: true, command: switchCmd, raw: received || '(applied)' });
+        }
+      }, 1500);
+    });
+
+    req.on('error', (e) => rej(new Error(`Hermes WS error: ${e.message}`)));
+    req.on('timeout', () => { req.destroy(); rej(new Error('Hermes WS timeout')); });
+    req.end();
+  });
+});
+
 // ── hermes.send ─────────────────────────────────────────────────
 registry.register('hermes.send', async ({ session_id, prompt }) => {
   const h = getHermesState();

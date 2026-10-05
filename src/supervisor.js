@@ -10,6 +10,7 @@
  */
 
 import { createServer } from 'node:http';
+import http from 'node:http';
 import { exec, spawn } from 'node:child_process';
 import { platform, arch, hostname, freemem, totalmem, cpus } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -246,6 +247,58 @@ function handleUpdate(_req, res) {
   json(res, 200, { ok: false, message: 'Not implemented yet' });
 }
 
+async function handleBridgeAction(req, res) {
+  if (!bridgePort) {
+    return json(res, 503, { ok: false, error: 'BRIDGE_NOT_READY', message: 'Bridge worker is starting up' });
+  }
+
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    return json(res, 400, { ok: false, error: 'Invalid JSON body' });
+  }
+
+  // Proxy to bridge worker
+  const payload = JSON.stringify(body);
+  const clientReq = http.request(
+    {
+      hostname: '127.0.0.1',
+      port: bridgePort,
+      path: '/action',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+      timeout: 15_000,
+    },
+    (clientRes) => {
+      let data = '';
+      clientRes.on('data', (c) => (data += c));
+      clientRes.on('end', () => {
+        try {
+          json(res, clientRes.statusCode, JSON.parse(data));
+        } catch {
+          res.writeHead(clientRes.statusCode, { 'Content-Type': 'application/json' });
+          res.end(data);
+        }
+      });
+    }
+  );
+
+  clientReq.on('error', (err) => {
+    json(res, 502, { ok: false, error: 'BRIDGE_UNREACHABLE', message: err.message });
+  });
+
+  clientReq.on('timeout', () => {
+    clientReq.destroy();
+    json(res, 504, { ok: false, error: 'BRIDGE_TIMEOUT', message: 'Bridge did not respond in time' });
+  });
+
+  clientReq.end(payload);
+}
+
 function handleLogs(_req, res) {
   const lines = logRing.slice(-LOG_SERVE_SIZE);
   json(res, 200, { ok: true, lines, count: lines.length });
@@ -262,9 +315,30 @@ const server = createServer(async (req, res) => {
     if (method === 'GET' && path === '/ping') return handlePing(req, res);
     if (method === 'GET' && path === '/status') return handleStatus(req, res);
     if (method === 'POST' && path === '/exec') return await handleExec(req, res);
+    if (method === 'POST' && path === '/action') return await handleBridgeAction(req, res);
     if (method === 'POST' && path === '/restart') return handleRestart(req, res);
     if (method === 'POST' && path === '/update') return handleUpdate(req, res);
     if (method === 'GET' && path === '/logs') return handleLogs(req, res);
+
+    // Proxy /action to DDB Main Bridge worker
+    if (method === 'POST' && path === '/action') {
+      if (!bridgeAlive || !bridgePort) {
+        return json(res, 503, { ok: false, error: 'Bridge worker not ready' });
+      }
+      const proxyReq = http.request({
+        hostname: '127.0.0.1',
+        port: bridgePort,
+        path: '/action',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      }, (proxyRes) => {
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(res);
+      });
+      proxyReq.on('error', (e) => json(res, 502, { ok: false, error: e.message }));
+      req.pipe(proxyReq);
+      return;
+    }
 
     // Bridge IPC endpoints
     if (method === 'POST' && path === '/heartbeat') return json(res, 200, { ok: true });
@@ -312,7 +386,7 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ── Start ────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, () => {
-  console.log(`DDB Shell Supervisor v${VERSION} | Crash-Shield active on :${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`DDB Shell Supervisor v${VERSION} | Crash-Shield active on 0.0.0.0:${PORT}`);
   spawnBridge();
 });
