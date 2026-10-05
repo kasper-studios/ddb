@@ -1,0 +1,14 @@
+{
+  "name": "ddb",
+  "version": "1.0.0",
+  "description": "Dirom Device Bridge — Universal Native Host Agent with WebSocket Events, REST API and Cloudflare Tunnel",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "emergency": "node src/emergency.js"
+  },
+  "keywords": ["ddb", "dirom", "agent", "bridge", "niri", "remote", "cloudflared"],
+  "author": "Kasper Studios (Kasperenok & Dirom)",
+  "license": "MIT"
+}
