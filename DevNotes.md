@@ -2,41 +2,55 @@
 
 > **Авторы концепта:** Kasperenok & Dirom (Архитекторы)  
 > **Исполнитель реализации:** Hermes (Инженер-Реализатор)  
-> **Статус:** Draft v1.0.0-PROPOSAL  
+> **Статус:** v1.1.0-SUPERVISOR-RUNTIME  
 > **Лицензия:** MIT / Суверенная Цитадель  
 
 ---
 
-## 1. Концепция и Проблема
+## 1. Концепция: DDB Runtime & Supervisor
 
-Текущий удалённый доступ к ноутбуку и серверам завязан на сырой SSH (`asyncssh`), что создаёт критические узкие места:
-1. **Жесткая привязка к портам/IP:** необходимость прямого IP или проброса портов, чувствительность к разрывам соединения и NAT.
-2. **Отсутствие реалтайм-событий:** SSH пассивен, он не умеет транслировать в модель системные эвенты хоста (смена активного окна в Niri, уведомления, состояние батареи, звук).
-3. **Громоздкость:** исполнение сложных сценариев требует экранирования строк и парсинга неструктурированного текста bash.
+DDB эволюционирует из простого шлюза в **полноценный системный рантайм-супервайзер (DDB Runtime)**:
 
-**DDB (Dirom Device Bridge)** — универсальный легковесный агент хоста (Node.js ESM / TypeScript), работающий поверх протоколов HTTP REST + WebSocket + Cloudflare Tunnel, с авто-детекцией возможностей (Capability-Based Architecture).
+1. **Экстренный шелл в роли Root-Супервайзера (DDB Supervisor Runtime, порт `:8790`):**
+   * Это главный служебный процесс, который прописывается в автозагрузку системы (`systemd` / `crontab` / `init`).
+   * Он ультра-легковесный, неубиваемый и автономный.
+   * **Обязанности Супервайзера:**
+     * **Watchdog / Keep-Alive:** поднимает, мониторит и при крашах моментально перезапускает основной процесс `DDB Main Bridge` (`:8780`);
+     * **Updater:** подтягивает свежие обновления DDB из Git по сигналу или вебхуку без риска окирпичить хост;
+     * **Telemetry & Health:** отдаёт легковесную телеметрию хоста (CPU, RAM, диски, Uptime), даже если основной стек завис;
+     * **Emergency Shell:** исполняет прямые экстренные команды (`reboot`, `kill`, `service restart`) при сбоях.
+
+2. **Основной рабочий процесс (DDB Main Bridge, порт `:8780`):**
+   * Подтягивается и контролируется Супервайзером;
+   * Реализует богатый функционал: REST API, WebSocket эвент-стрим, захват экрана, Niri IPC, звук и микрофон.
+
+3. **Новая категория тулов Дирома — `device.*` (Device Tools):**
+   * Полностью заменяет старую категорию `ssh.*`;
+   * Поддерживает множественные хосты (`host='ponosik'`, `host='frankfurt'`, `host='auto'`);
+   * Прямой транспорт через DDB API (по Cloudflared туннелю или локальной сети).
 
 ---
 
-## 2. Архитектура Возможностей (Capability-Based Architecture)
+## 2. Архитектура Возможностей (Capability-Based)
 
-DDB обязан запускаться на **ЛЮБОМ** Linux-устройстве:
-* Ноутбук `ponosik` (Arch Linux + Wayland / Niri WM);
+DDB обязан запускаться на **ЛЮБОМ** устройстве Цитадели:
+* Ноутбук `ponosik` (Arch Linux + Wayland / Niri WM + PipeWire);
 * Облачные VPS (`truemain` / Ubuntu Headless без GUI и звука);
 * Мобильные Linux-окружения (Termux / aarch64).
 
-При старте DDB сканирует окружение и активирует флаги:
-
+### Флаги окружения при старте:
 ```json
 {
   "hostname": "ponosik",
   "os": "Arch Linux 7.1.8-arch1-3",
   "arch": "x86_64",
+  "runtime_version": "1.1.0",
   "capabilities": {
     "core": true,
     "display": true,
     "display_server": "wayland-niri",
-    "audio": true,
+    "audio_out": true,
+    "audio_in": true,
     "audio_server": "pipewire",
     "notifications": true,
     "battery": true
@@ -44,102 +58,63 @@ DDB обязан запускаться на **ЛЮБОМ** Linux-устройс
 }
 ```
 
-Если дисплей или звук отсутствуют (например, на VPS) — соответствующие модули мягко отключаются без падения демона.
+---
+
+## 3. Звук и Микрофон (Акустический Орган Ноутбука)
+
+При наличии `capabilities.audio_in` и `audio_out` DDB реализует двусторонний аудио-мост:
+
+1. **`device.audio.speak` / `device.audio.play` (Вывод в динамики):**
+   * Воспроизведение звуков и речи (Voice Micro-DSL / PCM / MP3) прямо в колонки хоста через `pw-cat -p` или `mpv`;
+2. **`device.mic.listen` / `device.mic.stream` (Микрофон хоста):**
+   * Захват входящего потока микрофона комнаты через PipeWire (`pw-cat -r` / `parec`);
+   * Режим стрима по WebSocket: передача чанков PCM (16kHz mono) в слуховой сокет Дирома (VAD + Whisper / Gemini Live) для акустического радара шагов, храпа и диалогов.
 
 ---
 
-## 3. Двухуровневая Структура Процессов
+## 4. Категория инструментов `device.*` у Дирома
 
-Для исключения ситуаций, когда сбой скрипта намертво вешает доступ к хосту, DDB разделен на **ДВА НЕЗАВИСИМЫХ ПРОЦЕССА**:
+Вместо старых `ssh_run`, `ssh_read_file` Диром получает нативную категорию:
 
-### Процесс 1: DDB Main Daemon (Порт `:8780`)
-Основной богатый сервис с WebSocket и REST API.
+* **`device.exec(cmd, host='auto', timeout=30)`** — выполнение шелл-команд через DDB REST;
+* **`device.screen(host='auto')`** — захват кадра экрана (Wayland/grim) прямо в Base64 без сохранения на диск;
+* **`device.fs.read(path, offset=1, limit=200, host='auto')`** — структурированное чтение файлов с пагинацией;
+* **`device.fs.write(path, content, host='auto')`** — атомарная запись файлов;
+* **`device.fs.list(path, host='auto')`** — список файлов и папок;
+* **`device.audio.play(audio_url_or_sample, host='auto')`** — воспроизведение в динамики хоста;
+* **`device.mic.inspect(duration_sec=5, host='auto')`** — захват аудио с микрофона и мультимодальный анализ обстановки;
+* **`device.windows.list(host='auto')`** — список открытых окон и активный фокус Niri;
+* **`device.emergency.exec(cmd, host='auto')`** — прямой экстренный вызов через порт Супервайзера `:8790`.
 
-#### Эндпоинты REST API:
-* `GET /api/v1/ping` — телеметрия хоста (CPU, RAM, диски, uptime, capabilities).
-* `POST /api/v1/exec` — запуск процесса.
-  * *Request Body:* `{"command": "git status", "cwd": "/path", "timeout_ms": 30000, "env": {}}`
-  * *Response:* `{"exit_code": 0, "stdout": "...", "stderr": "...", "duration_ms": 120}`
-* `POST /api/v1/exec/stream` — SSE/Chunked запуск для длительных билдов (Gradle/Cargo).
-* `GET /api/v1/screen` — мгновенный кадр экрана (только при `capabilities.display == true`).
-  * Реализация под Niri/Wayland: вызов `grim -t jpeg -q 80 -` напрямую в ответ стримом без сохранения на SSD.
-* `POST /api/v1/fs/read` — чтение файла с пагинацией (offset/limit строк).
-* `POST /api/v1/fs/write` — атомарная запись файла.
-* `POST /api/v1/fs/list` — просмотр директории с размерами и датами.
-* `POST /api/v1/audio/play` — воспроизведение PCM/WAV/MP3 через `pw-cat -p` / `mpv` (при наличии audio).
+---
 
-#### WebSocket Event Stream (`/ws/events`):
-Реалтайм-шина системных событий. Сообщения имеют вид:
-```json
-{
-  "type": "niri_window_focus",
-  "timestamp": 1791219800123,
-  "data": {
-    "app_id": "firefox",
-    "title": "YouTube - Mozilla Firefox",
-    "workspace": 1
-  }
-}
+## 5. Структура Репозитория
+
 ```
-* **Источники событий:**
-  * `niri`: чтение stdout от `niri msg -j event-stream`;
-  * `notifications`: D-Bus мониторинг `org.freedesktop.Notifications`;
-  * `mpris`: D-Bus отслеживание медиаплееров (`org.mpris.MediaPlayer2`);
-  * `power`: UPower / sysfs события зарядки и батареи.
-
----
-
-### Процесс 2: Emergency Fallback API (Порт `:8790`)
-Аварийный минималистичный агент.
-* **Стек:** Нативный микро-сервис без сторонних библиотек (чистый встроенный модуль `node:http`).
-* **Размер кода:** < 70 строк.
-* **Функционал:** строго один эндпоинт `POST /emergency/exec` с авторизацией по `X-DDB-Emergency-Token`.
-* **Назначение:** если Main Daemon упал, завис в утечке памяти или зациклился — аварийный агент гарантированно отвечает и позволяет выполнить:
-  * `systemctl --user restart ddb-main`
-  * `kill -9 <pid>`
-  * `reboot`
-
----
-
-## 4. Сетевая Инфраструктура и Cloudflared
-
-1. **Встроенная поддержка Cloudflared Tunnel:**
-   * DDB содержит конфиг и сервис-скрипт для привязки к `cloudflared`.
-   * Маршрутизация:
-     * `*.kasperstudios.xyz` ➔ проксирует порт `:8780` (Main API & WSS);
-     * Аварийный порт `:8790` может быть привязан к отдельному пути или открыт локально/через резервный токен.
-2. **Безопасность (Zero-Trust Token):**
-   * Все запросы требуют заголовок `Authorization: Bearer <DDB_SECRET_TOKEN>`.
-   * Токен генерируется при первичной установке инсталлятором и сохраняется в защищенном конфиге `~/.config/ddb/config.json` (chmod 600).
-
----
-
-## 5. Скрипт Инсталлятора (`install.sh`)
-
-Установка в 1 команду:
-```bash
-curl -sSL https://raw.githubusercontent.com/kasper-studios/ddb/main/install.sh | bash
+ddb/
+├── DevNotes.md              # Настоящий операционный контракт
+├── package.json             # ESM модуль
+├── install.sh               # Инсталлятор в 1 команду
+├── src/
+│   ├── supervisor.js        # Root-рантайм (:8790): автозагрузка, watchdog, апдейтер, телеметрия
+│   ├── index.js             # DDB Main Bridge (:8780): REST API + WSS
+│   ├── capabilities.js      # Сканер железа и серверов (Niri, PipeWire, D-Bus)
+│   ├── adapters/
+│   │   ├── niri.js          # Niri IPC сокет эвентов (event-stream)
+│   │   ├── dbus.js          # D-Bus (уведомления, MPRIS)
+│   │   ├── audio.js         # PipeWire вывод и захват микрофона
+│   │   └── screen.js        # Wayland grim захват экрана
+│   └── cloudflared.js       # Менеджер туннеля *.kasperstudios.xyz
 ```
-
-### Задачи инсталлятора:
-1. Проверка наличия Node.js 20+ (при отсутствии — подсказка или авто-установка).
-2. Клонирование репозитория в `~/.local/share/ddb` или `~/.config/ddb`.
-3. Установка легковесных зависимостей (`npm ci --omit=dev`).
-4. Генерация криптографического токена доступа.
-5. Проверка установленных утилит хоста (`grim`, `pw-cat`, `cloudflared`, `niri`).
-6. Создание и включение systemd user-юнитов:
-   * `ddb.service` (Основной мост)
-   * `ddb-emergency.service` (Аварийный шелл)
-7. Вывод красивого ASCII-баннера DDB с короной и реквизитами подключения.
 
 ---
 
 ## 6. Задачи для Гермеса (Hermes Implementation Checklist)
 
-- [ ] Создать структуру проекта (Node.js ESM, package.json, src/).
-- [ ] Реализовать модуль детекции окружения `src/capabilities.js`.
-- [ ] Реализовать `src/emergency_server.js` (изолированный `:8790`).
-- [ ] Реализовать основной REST сервер Express/Fastify (`:8780`).
-- [ ] Реализовать WebSocket брокер `src/ws_events.js` с адаптерами Niri IPC и D-Bus.
-- [ ] Написать `install.sh` для развертывания на Arch/Ubuntu.
-- [ ] Инициализировать Git-репозиторий и подготовить к пушу на GitHub.
+- [ ] Реализовать `src/supervisor.js` (:8790, встроенный `node:http`, watchdog дочернего процесса DDB Main, endpoint `/emergency/exec` и `/health`).
+- [ ] Реализовать `src/index.js` (:8780, REST + WebSocket `/ws/events`).
+- [ ] Реализовать `src/adapters/audio.js` (PipeWire play + mic stream).
+- [ ] Реализовать `src/adapters/screen.js` (быстрый grim в память).
+- [ ] Реализовать `src/adapters/niri.js` (потоковый парсинг `niri msg -j event-stream`).
+- [ ] Обновить `install.sh` для создания единого автозапуска супервайзера `ddb-supervisor.service`.
+- [ ] Протестировать запуск на ноутбуке `ponosik` и проверить порты `:8780` и `:8790`.
