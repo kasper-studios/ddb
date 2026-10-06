@@ -12,6 +12,7 @@
 import { createServer } from 'node:http';
 import http from 'node:http';
 import { exec, spawn } from 'node:child_process';
+import { readlinkSync } from 'node:fs';
 import { platform, arch, hostname, freemem, totalmem, cpus } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -77,7 +78,12 @@ function spawnBridge() {
   };
 
   const isBunBinary = import.meta.url && import.meta.url.includes('$bunfs');
-  const execCmd = process.argv[0] || process.execPath;
+  let execCmd = process.argv[0] || process.execPath;
+  if (process.platform === 'linux') {
+    try {
+      execCmd = readlinkSync('/proc/self/exe');
+    } catch {}
+  }
 
   if (isBunBinary) {
     // Inside compiled standalone binary: re-spawn self with --bridge flag!

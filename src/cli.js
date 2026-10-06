@@ -72,6 +72,10 @@ if (args.includes('--bridge')) {
 } else if (args.includes('--daemon') || args.includes('--supervisor')) {
   // Headless supervisor mode
   await import('./supervisor.js');
+} else if (args[0] === 'install') {
+  const { runInstall } = await import('./tui.js');
+  const res = await runInstall();
+  console.log(res.ok ? `[OK] ${res.message}` : `[ERR] ${res.error}`);
 } else if (args[0] === 'status') {
   await printStatus();
 } else if (args[0] === 'restart') {

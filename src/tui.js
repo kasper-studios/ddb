@@ -19,7 +19,17 @@ const __dirname = dirname(__filename);
 const SUPERVISOR_SCRIPT = join(__dirname, 'supervisor.js');
 const SUPERVISOR_PORT = parseInt(process.env.DDB_SHELL_PORT, 10) || 8790;
 
+import { readlinkSync } from 'node:fs';
+
 function getSelfExecutable() {
+  // On Linux, /proc/self/exe is the absolute rock-solid path to the running binary
+  if (process.platform === 'linux') {
+    try {
+      return readlinkSync('/proc/self/exe');
+    } catch {
+      // fallback
+    }
+  }
   return process.argv[0] || process.execPath;
 }
 
@@ -273,6 +283,10 @@ async function feedbackMenu() {
 }
 
 // ── Main TUI Runner ───────────────────────────────────────────────
+
+export async function runInstall() {
+  return await installSystemd();
+}
 
 export async function runTUI() {
   while (true) {
