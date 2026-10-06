@@ -3,15 +3,29 @@
  * Manages config.json, permissions matrix, and tunnels
  */
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
 import crypto from 'node:crypto';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const CONFIG_PATH = join(__dirname, '..', 'config.json');
+function resolveConfigPath() {
+  // If running inside a compiled Bun binary ($bunfs), write to real user home/config directory
+  if (process.env.DDB_CONFIG_PATH) return process.env.DDB_CONFIG_PATH;
+  
+  const isBunFs = import.meta.url && import.meta.url.includes('$bunfs');
+  if (isBunFs || !process.env.NODE_ENV) {
+    const home = os.homedir();
+    return join(home, '.config', 'ddb', 'config.json');
+  }
+
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+  return join(__dirname, '..', 'config.json');
+}
+
+const CONFIG_PATH = resolveConfigPath();
 
 export const DEFAULT_CONFIG = {
   host_name: 'ponosik',
@@ -66,6 +80,7 @@ export async function loadConfig() {
 
 export async function saveConfig(cfg) {
   cachedConfig = cfg;
+  await mkdir(dirname(CONFIG_PATH), { recursive: true });
   await writeFile(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf-8');
   return cachedConfig;
 }

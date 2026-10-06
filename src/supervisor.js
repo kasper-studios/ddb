@@ -76,11 +76,23 @@ function spawnBridge() {
     DDB_SUPERVISOR_PORT: String(PORT),
   };
 
-  bridge = spawn(process.execPath, [BRIDGE_ENTRY], {
-    cwd: PROJECT_ROOT,
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const isBunBinary = import.meta.url && import.meta.url.includes('$bunfs');
+  const execCmd = process.argv[0] || process.execPath;
+
+  if (isBunBinary) {
+    // Inside compiled standalone binary: re-spawn self with --bridge flag!
+    bridge = spawn(execCmd, ['--bridge'], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } else {
+    // Normal Node.js environment
+    bridge = spawn(process.execPath, [BRIDGE_ENTRY], {
+      cwd: PROJECT_ROOT,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  }
 
   bridgeAlive = true;
   bridgePid = bridge.pid;

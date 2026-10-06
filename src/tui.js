@@ -19,6 +19,31 @@ const __dirname = dirname(__filename);
 const SUPERVISOR_SCRIPT = join(__dirname, 'supervisor.js');
 const SUPERVISOR_PORT = parseInt(process.env.DDB_SHELL_PORT, 10) || 8790;
 
+function getSelfExecutable() {
+  return process.argv[0] || process.execPath;
+}
+
+function spawnSupervisorProcess() {
+  const isBunBinary = import.meta.url && import.meta.url.includes('$bunfs');
+  const env = { ...process.env, DDB_SHELL_PORT: String(SUPERVISOR_PORT) };
+
+  if (isBunBinary) {
+    // Compiled binary: re-spawn self with --daemon
+    return spawn(getSelfExecutable(), ['--daemon'], {
+      detached: true,
+      stdio: 'ignore',
+      env,
+    });
+  }
+
+  // Node dev script: spawn node supervisor.js
+  return spawn(process.execPath, [SUPERVISOR_SCRIPT], {
+    detached: true,
+    stdio: 'ignore',
+    env,
+  });
+}
+
 function ask(questionText) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -97,13 +122,14 @@ function getLocalIp() {
 }
 
 async function installSystemd() {
+  const execCmd = `${getSelfExecutable()} --daemon`;
   const serviceContent = `[Unit]
 Description=DDB Shell Supervisor (Dirom Device Bridge)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${process.execPath} ${SUPERVISOR_SCRIPT}
+ExecStart=${execCmd}
 Restart=always
 RestartSec=5
 Environment=DDB_SHELL_PORT=8790
@@ -135,17 +161,17 @@ async function permissionsMenu() {
     const cfg = await loadConfig();
     const p = cfg.permissions;
 
-    console.log('\n  \x1b[1m\x1b[35m=== 🔒 НАСТРОЙКА РАЗРЕШЕНИЙ (PERMISSIONS MATRIX) ===\x1b[0m');
+    console.log('\n  \x1b[1m\x1b[35m[ ПРАВА И РАЗРЕШЕНИЯ ]\x1b[0m');
     console.log('  \x1b[90mУправляйте тем, что Диром имеет право делать на этой машине:\x1b[0m\n');
 
-    console.log(`  [1] 🖱️  Display Control (клики/ввод):   ${p.display_control?.enabled ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
-    console.log(`  [2] 📸 Скриншоты экрана (grim/CUA):    ${p.screen ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
-    console.log(`  [3] 🎙️  Звук и Микрофон (sound_steal):  ${p.audio ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
-    console.log(`  [4] 📁 Чтение файлов (fs.read/list):   ${p.fs?.read ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
-    console.log(`  [5] ✏️  Запись файлов (fs.write):       ${p.fs?.write ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
-    console.log(`  [6] ⚡ Выполнение шелл-команд (exec):  ${p.exec ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
-    console.log(`  [7] 🤝 Hermes Desktop Bridge:          ${p.hermes ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
-    console.log('  \x1b[90m[0] ⬅️  Назад в главное меню\x1b[0m\n');
+    console.log(`  [1] Display Control (клики/ввод):   ${p.display_control?.enabled ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log(`  [2] Скриншоты экрана (grim/CUA):    ${p.screen ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log(`  [3] Звук и Микрофон (sound_steal):  ${p.audio ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log(`  [4] Чтение файлов (fs.read/list):   ${p.fs?.read ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log(`  [5] Запись файлов (fs.write):       ${p.fs?.write ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log(`  [6] Выполнение шелл-команд (exec):  ${p.exec ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log(`  [7] Hermes Desktop Bridge:          ${p.hermes ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log('  \x1b[90m[0] <- Назад в главное меню\x1b[0m\n');
 
     const choice = await ask('  Выберите пункт для переключения: ');
     if (choice === '0') break;
@@ -181,14 +207,14 @@ async function tunnelMenu() {
   printLogo();
   const cfg = await loadConfig();
 
-  console.log('\n  \x1b[1m\x1b[36m=== 🌐 НАСТРОЙКА СЕТИ И ТУННЕЛЕЙ ===\x1b[0m');
+  console.log('\n  \x1b[1m\x1b[36m[ СЕТЬ И ТУННЕЛИ ]\x1b[0m');
   console.log('  \x1b[90mВыберите, как Диром будет связываться с этим компьютером:\x1b[0m\n');
 
-  console.log('  \x1b[33m[1]\x1b[0m ☁️  Kasper Cloud API (Zero-Config WSS)');
-  console.log('  \x1b[33m[2]\x1b[0m 🚇 Cloudflare Tunnel (токен туннеля)');
-  console.log('  \x1b[33m[3]\x1b[0m ⚡ Ngrok Tunnel (authtoken)');
-  console.log('  \x1b[33m[4]\x1b[0m 🏠 Локальная сеть LAN (прямой IP)');
-  console.log('  \x1b[90m[0]\x1b[0m ⬅️  Назад\n');
+  console.log('  \x1b[33m[1]\x1b[0m Kasper Cloud API (Zero-Config WSS)');
+  console.log('  \x1b[33m[2]\x1b[0m Cloudflare Tunnel (токен туннеля)');
+  console.log('  \x1b[33m[3]\x1b[0m Ngrok Tunnel (authtoken)');
+  console.log('  \x1b[33m[4]\x1b[0m Локальная сеть LAN (прямой IP)');
+  console.log('  \x1b[90m[0]\x1b[0m <- Назад\n');
 
   const c = await ask('  > ');
   if (c === '1') {
@@ -197,7 +223,7 @@ async function tunnelMenu() {
       cfg.tunnel_type = 'cloud';
       cfg.tunnel_token = key;
       await saveConfig(cfg);
-      console.log('  ✅ Режим переключен на Kasper Cloud API!');
+      console.log('  [OK] Режим переключен на Kasper Cloud API!');
     }
   } else if (c === '2') {
     const token = await ask('  Введите токен Cloudflare Tunnel: ');
@@ -205,7 +231,7 @@ async function tunnelMenu() {
       cfg.tunnel_type = 'cloudflare';
       cfg.tunnel_token = token;
       await saveConfig(cfg);
-      console.log('  ✅ Токен Cloudflare сохранён!');
+      console.log('  [OK] Токен Cloudflare сохранён!');
     }
   } else if (c === '3') {
     const token = await ask('  Введите Ngrok Authtoken: ');
@@ -213,12 +239,12 @@ async function tunnelMenu() {
       cfg.tunnel_type = 'ngrok';
       cfg.tunnel_token = token;
       await saveConfig(cfg);
-      console.log('  ✅ Токен Ngrok сохранён!');
+      console.log('  [OK] Токен Ngrok сохранён!');
     }
   } else if (c === '4') {
     cfg.tunnel_type = 'lan';
     await saveConfig(cfg);
-    console.log('  ✅ Переключено на прямую связь по локальной сети LAN!');
+    console.log('  [OK] Переключено на прямую связь по локальной сети LAN!');
   }
 
   await pause();
@@ -229,11 +255,11 @@ async function tunnelMenu() {
 async function feedbackMenu() {
   console.clear();
   printLogo();
-  console.log('\n  \x1b[1m\x1b[32m=== 💡 ОБРАТНАЯ СВЯЗЬ И ИДЕИ ===\x1b[0m');
+  console.log('\n  \x1b[1m\x1b[32m[ ОБРАТНАЯ СВЯЗЬ И ИДЕИ ]\x1b[0m');
   console.log('  \x1b[90mКуда вы хотите направить идею или баг-репорт:\x1b[0m\n');
-  console.log('  \x1b[33m[1]\x1b[0m 👾 Discord сервер Kasper Studios (https://discord.gg/kasper)');
-  console.log('  \x1b[33m[2]\x1b[0m 🐙 GitHub Issues репозитория DDB');
-  console.log('  \x1b[90m[0]\x1b[0m ⬅️  Назад\n');
+  console.log('  \x1b[33m[1]\x1b[0m Discord сервер Kasper Studios (https://discord.gg/kasper)');
+  console.log('  \x1b[33m[2]\x1b[0m GitHub Issues репозитория DDB');
+  console.log('  \x1b[90m[0]\x1b[0m <- Назад\n');
 
   const c = await ask('  > ');
   if (c === '1') {
@@ -261,37 +287,33 @@ export async function runTUI() {
     console.log('  \x1b[90mКраш-Шилд Супервайзер & Агент Хоста Цитадели\x1b[0m\n');
 
     if (status && status.ok) {
-      console.log(`  🟢 \x1b[32mСупервайзер:\x1b[0m АКТИВЕН (:8790, PID: ${status.bridge?.pid || '?'}, аптайм: ${status.uptime}s)`);
-      console.log(`  🖥️  \x1b[36mХост:\x1b[0m ${cfg.host_name} (LAN IP: \x1b[1m${localIp}\x1b[0m, RAM: ${Math.round((status.host?.freemem || 0)/1024/1024)}MB)`);
-      console.log(`  🔑 \x1b[33mAPI Ключ:\x1b[0m ${cfg.api_key}`);
+      console.log(`  \x1b[32m[+]\x1b[0m \x1b[32mСупервайзер:\x1b[0m АКТИВЕН (:8790, PID: ${status.bridge?.pid || '?'}, аптайм: ${status.uptime}s)`);
+      console.log(`  \x1b[36m[*]\x1b[0m \x1b[36mХост:\x1b[0m ${cfg.host_name} (LAN IP: \x1b[1m${localIp}\x1b[0m, RAM: ${Math.round((status.host?.freemem || 0)/1024/1024)}MB)`);
+      console.log(`  \x1b[33m[#]\x1b[0m \x1b[33mAPI Ключ:\x1b[0m ${cfg.api_key}`);
       
       const targetUrl = cfg.tunnel_type === 'lan' ? `http://${localIp}:${SUPERVISOR_PORT}` : (cfg.tunnel_url || 'Cloud Tunnel');
-      console.log(`\n  \x1b[1m\x1b[32m👉 СКОПИРУЙТЕ ДЛЯ ДИРОМА:\x1b[0m`);
+      console.log(`\n  \x1b[1m\x1b[32mСкопируйте для Дирома:\x1b[0m`);
       console.log(`  \x1b[1m\x1b[33mdevice.reg(name='${cfg.host_name}', url='${targetUrl}', key='${cfg.api_key}')\x1b[0m`);
     } else {
-      console.log(`  🔴 \x1b[31mСупервайзер:\x1b[0m НЕ ЗАПУЩЕН (порт :${SUPERVISOR_PORT} свободен)`);
+      console.log(`  \x1b[31m[-]\x1b[0m \x1b[31mСупервайзер:\x1b[0m НЕ ЗАПУЩЕН (порт :${SUPERVISOR_PORT} свободен)`);
     }
 
     console.log('\n  \x1b[1mМеню управления:\x1b[0m');
-    console.log('  \x1b[33m[1]\x1b[0m 🚀 Запустить DDB Супервайзер в фоне');
-    console.log('  \x1b[33m[2]\x1b[0m 🔒 Настройка разрешений (Permissions Matrix)');
-    console.log('  \x1b[33m[3]\x1b[0m 🌐 Настройка сети и туннелей');
-    console.log('  \x1b[43m\x1b[30m[4]\x1b[0m ⚙️  Установить в автозагрузку (systemd --user)');
-    console.log('  \x1b[33m[5]\x1b[0m 📊 Проверить статус хоста и Hermes');
-    console.log('  \x1b[33m[6]\x1b[0m 🔄 Перезапустить DDB Bridge воркер');
-    console.log('  \x1b[33m[7]\x1b[0m 💡 Обратная связь / Сообщить об ошибке');
-    console.log('  \x1b[33m[8]\x1b[0m 🛑 Остановить DDB Супервайзер');
-    console.log('  \x1b[90m[0]\x1b[0m ❌ Выход\n');
+    console.log('  \x1b[33m[1]\x1b[0m Запустить DDB Супервайзер в фоне');
+    console.log('  \x1b[33m[2]\x1b[0m Настройка разрешений (Permissions Matrix)');
+    console.log('  \x1b[33m[3]\x1b[0m Настройка сети и туннелей');
+    console.log('  \x1b[33m[4]\x1b[0m Установить в автозагрузку (systemd --user)');
+    console.log('  \x1b[33m[5]\x1b[0m Проверить статус хоста и Hermes');
+    console.log('  \x1b[33m[6]\x1b[0m Перезапустить DDB Bridge воркер');
+    console.log('  \x1b[33m[7]\x1b[0m Обратная связь / Сообщить об ошибке');
+    console.log('  \x1b[33m[8]\x1b[0m Остановить DDB Супервайзер');
+    console.log('  \x1b[90m[0]\x1b[0m Выход\n');
 
     const choice = await ask('  > ');
 
     if (choice === '1') {
       console.log('\n🚀 Запускаю супервайзер...');
-      const child = spawn(process.execPath, [SUPERVISOR_SCRIPT], {
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env, DDB_SHELL_PORT: String(SUPERVISOR_PORT) },
-      });
+      const child = spawnSupervisorProcess();
       child.unref();
       await new Promise((r) => setTimeout(r, 1500));
       await pause();

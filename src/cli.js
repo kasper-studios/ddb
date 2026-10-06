@@ -66,7 +66,10 @@ async function triggerRestart() {
 
 // ── Routing ──────────────────────────────────────────────────
 
-if (args.includes('--daemon') || args.includes('--supervisor')) {
+if (args.includes('--bridge')) {
+  // Bridge worker mode (spawned by supervisor)
+  await import('./index.js');
+} else if (args.includes('--daemon') || args.includes('--supervisor')) {
   // Headless supervisor mode
   await import('./supervisor.js');
 } else if (args[0] === 'status') {
