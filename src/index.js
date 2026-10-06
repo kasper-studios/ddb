@@ -19,6 +19,7 @@ import { join, resolve } from 'node:path';
 
 import { ActionRegistry } from './bridge.js';
 import { startHermesWatch, getHermesState } from './hermes_discover.js';
+import { isActionPermitted, loadConfig } from './config.js';
 
 const execAsync = promisify(exec);
 
@@ -593,6 +594,19 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end(
         JSON.stringify({ ok: false, error: 'MISSING_ACTION' }),
+      );
+    }
+
+    // Permissions check
+    const allowed = await isActionPermitted(action, params || {});
+    if (!allowed) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      return res.end(
+        JSON.stringify({
+          ok: false,
+          error: 'FORBIDDEN',
+          message: `Action '${action}' is disabled by host owner in TUI permissions matrix`,
+        }),
       );
     }
 
