@@ -123,9 +123,30 @@ pub async fn execute_action(
 
         // ── 3. Screen & Display Control ─────────────────────────────
         "screen" => {
-            let output = Command::new("grim").arg("-").output()?;
+            let mut cmd = Command::new("grim");
+            if std::env::var("WAYLAND_DISPLAY").is_err() {
+                // Детектим сокет wayland в /run/user/<uid> или фоллбекаем на wayland-1
+                let wayland_display = if std::path::Path::new("/run/user/1000/wayland-1").exists() {
+                    "wayland-1"
+                } else if std::path::Path::new("/run/user/1000/wayland-0").exists() {
+                    "wayland-0"
+                } else {
+                    "wayland-1"
+                };
+                cmd.env("WAYLAND_DISPLAY", wayland_display);
+            }
+            if std::env::var("XDG_RUNTIME_DIR").is_err() {
+                let uid = dirs::data_dir()
+                    .and_then(|p| p.to_str().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                let uid_str = if uid.contains("1000") { "1000" } else { "1000" };
+                cmd.env("XDG_RUNTIME_DIR", format!("/run/user/{}", uid_str));
+            }
+
+            let output = cmd.arg("-").output()?;
             if !output.status.success() {
-                return Err(anyhow::anyhow!("grim screenshot failed"));
+                let err_msg = String::from_utf8_lossy(&output.stderr);
+                return Err(anyhow::anyhow!("grim screenshot failed: {}", err_msg.trim()));
             }
             let b64 = base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
