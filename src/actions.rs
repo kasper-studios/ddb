@@ -1,24 +1,34 @@
 use crate::config::DdbConfig;
+#[cfg(feature = "hermes")]
 use crate::hermes::discover_hermes;
+use crate::pointer::DiromPointer;
 use anyhow::Result;
+#[cfg(feature = "hermes")]
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "hermes")]
 use tokio_tungstenite::connect_async;
+#[cfg(feature = "hermes")]
 use tokio_tungstenite::tungstenite::Message;
 
 pub async fn execute_action(
     action: &str,
     params: serde_json::Value,
     config: &DdbConfig,
+    pointer: Option<&Arc<DiromPointer>>,
 ) -> Result<serde_json::Value> {
     match action {
         // ── 1. Telemetry & Host Diagnostics ─────────────────────────
         "status" => {
             let mut sys = sysinfo::System::new_all();
             sys.refresh_all();
+            #[cfg(feature = "hermes")]
             let h = discover_hermes();
+            #[cfg(not(feature = "hermes"))]
+            let h = json!({ "found": false, "note": "Hermes disabled in public build" });
             Ok(json!({
                 "ok": true,
                 "host": {
@@ -40,8 +50,16 @@ pub async fn execute_action(
         "diagnostics" => {
             let mut sys = sysinfo::System::new_all();
             sys.refresh_all();
+            #[cfg(feature = "hermes")]
             let h = discover_hermes();
+            #[cfg(not(feature = "hermes"))]
+            let _h = json!({ "found": false, "port": null });
             let uptime = sysinfo::System::uptime();
+
+            #[cfg(feature = "hermes")]
+            let (h_found, h_port) = (h.found, h.port);
+            #[cfg(not(feature = "hermes"))]
+            let (h_found, h_port) = (false, None::<u16>);
 
             Ok(json!({
                 "ok": true,
@@ -53,8 +71,8 @@ pub async fn execute_action(
                 },
                 "memory_used_mb": (sys.total_memory() - sys.available_memory()) / 1024 / 1024,
                 "memory_total_mb": sys.total_memory() / 1024 / 1024,
-                "hermes_discovered": h.found,
-                "hermes_port": h.port,
+                "hermes_discovered": h_found,
+                "hermes_port": h_port,
             }))
         }
 
@@ -184,13 +202,39 @@ pub async fn execute_action(
                     }
                 }
                 "click" => {
-                    let x = params.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let y = params.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let _ = Command::new("ydotool")
-                        .args(["mousemove", "--absolute", &x.to_string(), &y.to_string()])
-                        .spawn();
-                    let _ = Command::new("ydotool").args(["click", "0xC0"]).spawn();
-                    Ok(json!({ "handled": true, "action": "click", "x": x, "y": y }))
+                    let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let btn = params.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+                    let duration = params.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(200);
+
+                    if let Some(ptr) = pointer {
+                        // Smooth human-like Bezier move + Click!
+                        ptr.move_to(x, y, duration)?;
+                        ptr.click(btn)?;
+                        Ok(json!({ "handled": true, "method": "uinput_bezier", "x": x, "y": y, "button": btn }))
+                    } else {
+                        // Fallback ydotool
+                        let _ = Command::new("ydotool")
+                            .args(["mousemove", "--absolute", &x.to_string(), &y.to_string()])
+                            .spawn();
+                        let _ = Command::new("ydotool").args(["click", "0xC0"]).spawn();
+                        Ok(json!({ "handled": true, "method": "ydotool_fallback", "x": x, "y": y }))
+                    }
+                }
+                "move" => {
+                    let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let duration = params.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(250);
+
+                    if let Some(ptr) = pointer {
+                        ptr.move_to(x, y, duration)?;
+                        Ok(json!({ "handled": true, "method": "uinput_bezier_move", "x": x, "y": y }))
+                    } else {
+                        let _ = Command::new("ydotool")
+                            .args(["mousemove", "--absolute", &x.to_string(), &y.to_string()])
+                            .spawn();
+                        Ok(json!({ "handled": true, "method": "ydotool_move", "x": x, "y": y }))
+                    }
                 }
                 "type" => {
                     let text = params
@@ -301,6 +345,7 @@ pub async fn execute_action(
         }
 
         // ── 6. Hermes Desktop Sibling Synapse ───────────────────────
+        #[cfg(feature = "hermes")]
         "hermes.sessions" => {
             let h = discover_hermes();
             if !h.found || h.port.is_none() {
@@ -316,6 +361,7 @@ pub async fn execute_action(
             Ok(resp)
         }
 
+        #[cfg(feature = "hermes")]
         "hermes.send" => {
             let prompt = params
                 .get("prompt")
@@ -331,6 +377,7 @@ pub async fn execute_action(
     }
 }
 
+#[cfg(feature = "hermes")]
 async fn send_to_hermes(prompt: &str, target_session: Option<&str>) -> Result<serde_json::Value> {
     let h = discover_hermes();
     if !h.found || h.port.is_none() {
@@ -464,6 +511,7 @@ async fn send_to_hermes(prompt: &str, target_session: Option<&str>) -> Result<se
     }))
 }
 
+#[allow(dead_code)]
 fn urlencoding(s: &str) -> String {
     let mut encoded = String::new();
     for b in s.bytes() {
