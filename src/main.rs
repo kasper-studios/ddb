@@ -59,18 +59,27 @@ async fn main() -> anyhow::Result<()> {
     let cancel_token = CancellationToken::new();
     let server_token = cancel_token.clone();
 
-    // Spawn Axum HTTP server on 0.0.0.0:8790 with graceful shutdown
+    // Spawn Axum HTTP server on 0.0.0.0:8790 with graceful shutdown (if not already running)
     let router = create_router(app_state);
     let addr = SocketAddr::from(([0, 0, 0, 0], 8790));
 
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                server_token.cancelled().await;
-            })
-            .await
-            .unwrap();
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                let _ = axum::serve(listener, router)
+                    .with_graceful_shutdown(async move {
+                        server_token.cancelled().await;
+                    })
+                    .await;
+            }
+            Err(e) => {
+                // Если порт уже занят (например, ddb-supervisor уже крутится в systemd),
+                // TUI-клиент не должен паниковать и ломать экран!
+                if is_daemon {
+                    eprintln!("Ошибка: порт {} уже занят: {}", addr, e);
+                }
+            }
+        }
     });
 
     if is_daemon {

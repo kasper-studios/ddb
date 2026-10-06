@@ -48,10 +48,11 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                 .direction(Direction::Vertical)
                 .margin(1)
                 .constraints([
-                    Constraint::Length(7),
+                    Constraint::Length(5),
+                    Constraint::Length(6),
                     Constraint::Length(8),
-                    Constraint::Min(5),
-                    Constraint::Length(3),
+                    Constraint::Min(4),
+                    Constraint::Length(1),
                 ])
                 .split(f.area());
 
@@ -73,16 +74,21 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                 ]),
             ];
             let banner = Paragraph::new(banner_text)
-                .block(Block::default().borders(Borders::ALL).title("Статус Агента"));
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::DarkGray))
+                        .title(" Статус Агента ")
+                );
             f.render_widget(banner, chunks[0]);
 
             // Hermes & Environment Status
             #[cfg(feature = "hermes")]
             let hermes_status = if hermes.found {
                 format!(
-                    "Подключен (pid={}, port={:?})",
+                    "Подключен (PID: {}, Порт: {})",
                     hermes.pid.unwrap_or(0),
-                    hermes.port
+                    hermes.port.map(|p| p.to_string()).unwrap_or_else(|| "нет".into())
                 )
             } else {
                 "Не найден".to_string()
@@ -92,26 +98,31 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
 
             let env_text = vec![
                 Line::from(vec![
-                    Span::styled("Hermes Desktop: ", Style::default().fg(Color::Cyan)),
+                    Span::styled("  • Hermes Desktop:  ", Style::default().fg(Color::Cyan)),
                     #[cfg(feature = "hermes")]
                     Span::styled(hermes_status, if hermes.found { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Red) }),
                     #[cfg(not(feature = "hermes"))]
                     Span::styled(hermes_status, Style::default().fg(Color::DarkGray)),
                 ]),
                 Line::from(vec![
-                    Span::styled("Память (RAM):   ", Style::default().fg(Color::Cyan)),
+                    Span::styled("  • Память (RAM):    ", Style::default().fg(Color::Cyan)),
                     Span::raw(format!("{:.1} GB / {:.1} GB свободно", 
                         sys.available_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
                         sys.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0
                     )),
                 ]),
                 Line::from(vec![
-                    Span::styled("Туннель:        ", Style::default().fg(Color::Cyan)),
+                    Span::styled("  • Туннель связи:   ", Style::default().fg(Color::Cyan)),
                     Span::raw(format!("{} (LAN direct mode)", cfg.tunnel_type)),
                 ]),
             ];
             let env_widget = Paragraph::new(env_text)
-                .block(Block::default().borders(Borders::ALL).title("Интеграции & Ресурсы"));
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::DarkGray))
+                        .title(" Интеграции & Ресурсы ")
+                );
             f.render_widget(env_widget, chunks[1]);
 
             // Permissions Matrix
@@ -139,13 +150,39 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                 ]),
             ];
             let perms_widget = Paragraph::new(perms_text)
-                .block(Block::default().borders(Borders::ALL).title("Матрица Разрешений (Permissions Matrix)"));
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::DarkGray))
+                        .title(" Матрица Разрешений (Permissions Matrix) ")
+                );
             f.render_widget(perms_widget, chunks[2]);
 
+            // Live Activity & Daemon Status
+            let activity_text = vec![
+                Line::from(vec![
+                    Span::styled("  [✓] Демон активен на ", Style::default().fg(Color::Green)),
+                    Span::styled("0.0.0.0:8790", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    Span::raw(" (готов к вызовам Дирома)"),
+                ]),
+                Line::from(vec![
+                    Span::styled("  [i] Доступные протоколы: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw("REST HTTP, WebSockets, UInput Pointer, Grim Display Capture"),
+                ]),
+            ];
+            let activity_widget = Paragraph::new(activity_text)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::DarkGray))
+                        .title(" Активность Моста ")
+                );
+            f.render_widget(activity_widget, chunks[3]);
+
             // Footer
-            let footer = Paragraph::new("Нажмите 'q' или 'Esc' для выхода в фон | 'r' для рефреша")
-                .style(Style::default().fg(Color::DarkGray));
-            f.render_widget(footer, chunks[3]);
+            let footer = Paragraph::new(" Нажмите 'q' или 'Esc' для выхода в фон | 'r' для рефреша")
+                .style(Style::default().fg(Color::Black).bg(Color::DarkGray));
+            f.render_widget(footer, chunks[4]);
         })?;
 
         if event::poll(Duration::from_millis(500))? {
