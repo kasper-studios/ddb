@@ -7,7 +7,10 @@
   "scripts": {
     "start": "node src/supervisor.js",
     "bridge": "node src/index.js",
-    "shell": "node src/supervisor.js"
+    "shell": "node src/supervisor.js",
+    "cli": "node src/cli.js",
+    "tui": "node src/cli.js",
+    "build": "node scripts/build-bin.js"
   },
   "keywords": ["ddb", "dirom", "agent", "bridge", "niri", "remote", "cloudflared", "supervisor"],
   "author": "Kasper Studios (Kasperenok & Dirom)",

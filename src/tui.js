@@ -1,22 +1,37 @@
 /**
  * DDB Interactive TUI
- * Terminal User Interface with mascot and system controls
+ * Terminal User Interface with mascot, permissions matrix, tunnel setup, and controls
  */
 
 import readline from 'node:readline';
 import http from 'node:http';
+import os from 'node:os';
 import { spawn, exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { printLogo } from './colored_logo.js';
+import { loadConfig, saveConfig } from './config.js';
 
 const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SUPERVISOR_SCRIPT = join(__dirname, 'supervisor.js');
-
 const SUPERVISOR_PORT = parseInt(process.env.DDB_SHELL_PORT, 10) || 8790;
+
+function ask(questionText) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(questionText, (ans) => {
+      rl.close();
+      resolve(ans.trim());
+    });
+  });
+}
+
+function pause() {
+  return ask('\n  Нажмите Enter для продолжения...');
+}
 
 function checkSupervisorStatus() {
   return new Promise((resolve) => {
@@ -69,6 +84,18 @@ function postSupervisor(path, body = {}) {
   });
 }
 
+function getLocalIp() {
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (net.family === 'IPv4' && !net.internal) {
+        return net.address;
+      }
+    }
+  }
+  return '127.0.0.1';
+}
+
 async function installSystemd() {
   const serviceContent = `[Unit]
 Description=DDB Shell Supervisor (Dirom Device Bridge)
@@ -99,39 +126,166 @@ WantedBy=default.target
   }
 }
 
-export async function runTUI() {
+// ── Permissions Menu ──────────────────────────────────────────────
+
+async function permissionsMenu() {
+  while (true) {
+    console.clear();
+    printLogo();
+    const cfg = await loadConfig();
+    const p = cfg.permissions;
+
+    console.log('\n  \x1b[1m\x1b[35m=== 🔒 НАСТРОЙКА РАЗРЕШЕНИЙ (PERMISSIONS MATRIX) ===\x1b[0m');
+    console.log('  \x1b[90mУправляйте тем, что Диром имеет право делать на этой машине:\x1b[0m\n');
+
+    console.log(`  [1] 🖱️  Display Control (клики/ввод):   ${p.display_control?.enabled ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log(`  [2] 📸 Скриншоты экрана (grim/CUA):    ${p.screen ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log(`  [3] 🎙️  Звук и Микрофон (sound_steal):  ${p.audio ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log(`  [4] 📁 Чтение файлов (fs.read/list):   ${p.fs?.read ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log(`  [5] ✏️  Запись файлов (fs.write):       ${p.fs?.write ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log(`  [6] ⚡ Выполнение шелл-команд (exec):  ${p.exec ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log(`  [7] 🤝 Hermes Desktop Bridge:          ${p.hermes ? '\x1b[32m[ВКЛ]\x1b[0m' : '\x1b[31m[ВЫКЛ]\x1b[0m'}`);
+    console.log('  \x1b[90m[0] ⬅️  Назад в главное меню\x1b[0m\n');
+
+    const choice = await ask('  Выберите пункт для переключения: ');
+    if (choice === '0') break;
+
+    if (choice === '1') {
+      if (!p.display_control) p.display_control = { enabled: false };
+      p.display_control.enabled = !p.display_control.enabled;
+    } else if (choice === '2') {
+      p.screen = !p.screen;
+    } else if (choice === '3') {
+      p.audio = !p.audio;
+    } else if (choice === '4') {
+      if (typeof p.fs !== 'object') p.fs = { read: true, write: false, list: true };
+      p.fs.read = !p.fs.read;
+      p.fs.list = p.fs.read;
+    } else if (choice === '5') {
+      if (typeof p.fs !== 'object') p.fs = { read: true, write: false, list: true };
+      p.fs.write = !p.fs.write;
+    } else if (choice === '6') {
+      p.exec = !p.exec;
+    } else if (choice === '7') {
+      p.hermes = !p.hermes;
+    }
+
+    await saveConfig(cfg);
+  }
+}
+
+// ── Tunnel Setup Menu ─────────────────────────────────────────────
+
+async function tunnelMenu() {
   console.clear();
   printLogo();
+  const cfg = await loadConfig();
 
-  console.log('\n  \x1b[1m\x1b[35m=== DDB (Dirom Device Bridge) v3.0.0 ===\x1b[0m');
-  console.log('  \x1b[90mКраш-Шилд Супервайзер & Агент Хоста Цитадели\x1b[0m\n');
+  console.log('\n  \x1b[1m\x1b[36m=== 🌐 НАСТРОЙКА СЕТИ И ТУННЕЛЕЙ ===\x1b[0m');
+  console.log('  \x1b[90mВыберите, как Диром будет связываться с этим компьютером:\x1b[0m\n');
 
-  const status = await checkSupervisorStatus();
-  if (status && status.ok) {
-    console.log(`  🟢 \x1b[32mСупервайзер активен на порту :${SUPERVISOR_PORT}\x1b[0m (PID: ${status.bridge?.pid || '?'}, аптайм: ${status.uptime}s)`);
-    console.log(`  🖥️  Хост: \x1b[36m${status.host?.hostname}\x1b[0m (${status.host?.platform} ${status.host?.arch}, RAM свободно: ${Math.round((status.host?.freemem || 0)/1024/1024)}MB)`);
-  } else {
-    console.log(`  🔴 \x1b[31mСупервайзер не запущен\x1b[0m (порт :${SUPERVISOR_PORT} свободен)`);
+  console.log('  \x1b[33m[1]\x1b[0m ☁️  Kasper Cloud API (Zero-Config WSS)');
+  console.log('  \x1b[33m[2]\x1b[0m 🚇 Cloudflare Tunnel (токен туннеля)');
+  console.log('  \x1b[33m[3]\x1b[0m ⚡ Ngrok Tunnel (authtoken)');
+  console.log('  \x1b[33m[4]\x1b[0m 🏠 Локальная сеть LAN (прямой IP)');
+  console.log('  \x1b[90m[0]\x1b[0m ⬅️  Назад\n');
+
+  const c = await ask('  > ');
+  if (c === '1') {
+    const key = await ask('  Введите ваш Cloud API ключ (выдаётся Создателем / Диромом): ');
+    if (key) {
+      cfg.tunnel_type = 'cloud';
+      cfg.tunnel_token = key;
+      await saveConfig(cfg);
+      console.log('  ✅ Режим переключен на Kasper Cloud API!');
+    }
+  } else if (c === '2') {
+    const token = await ask('  Введите токен Cloudflare Tunnel: ');
+    if (token) {
+      cfg.tunnel_type = 'cloudflare';
+      cfg.tunnel_token = token;
+      await saveConfig(cfg);
+      console.log('  ✅ Токен Cloudflare сохранён!');
+    }
+  } else if (c === '3') {
+    const token = await ask('  Введите Ngrok Authtoken: ');
+    if (token) {
+      cfg.tunnel_type = 'ngrok';
+      cfg.tunnel_token = token;
+      await saveConfig(cfg);
+      console.log('  ✅ Токен Ngrok сохранён!');
+    }
+  } else if (c === '4') {
+    cfg.tunnel_type = 'lan';
+    await saveConfig(cfg);
+    console.log('  ✅ Переключено на прямую связь по локальной сети LAN!');
   }
 
-  console.log('\n  \x1b[1mВыберите действие:\x1b[0m');
-  console.log('  \x1b[33m[1]\x1b[0m 🚀 Запустить DDB Супервайзер в фоне');
-  console.log('  \x1b[33m[2]\x1b[0m ⚙️  Установить в автозагрузку (systemd --user)');
-  console.log('  \x1b[33m[3]\x1b[0m 📊 Проверить статус хоста и Hermes');
-  console.log('  \x1b[33m[4]\x1b[0m 🔄 Перезапустить DDB Bridge');
-  console.log('  \x1b[33m[5]\x1b[0m 🛑 Остановить DDB Супервайзер');
-  console.log('  \x1b[90m[0]\x1b[0m ❌ Выход\n');
+  await pause();
+}
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
+// ── Feedback Menu ─────────────────────────────────────────────────
 
-  rl.question('  > ', async (choice) => {
-    rl.close();
-    const c = choice.trim();
+async function feedbackMenu() {
+  console.clear();
+  printLogo();
+  console.log('\n  \x1b[1m\x1b[32m=== 💡 ОБРАТНАЯ СВЯЗЬ И ИДЕИ ===\x1b[0m');
+  console.log('  \x1b[90mКуда вы хотите направить идею или баг-репорт:\x1b[0m\n');
+  console.log('  \x1b[33m[1]\x1b[0m 👾 Discord сервер Kasper Studios (https://discord.gg/kasper)');
+  console.log('  \x1b[33m[2]\x1b[0m 🐙 GitHub Issues репозитория DDB');
+  console.log('  \x1b[90m[0]\x1b[0m ⬅️  Назад\n');
 
-    if (c === '1') {
+  const c = await ask('  > ');
+  if (c === '1') {
+    console.log('\n  Открываю Discord...');
+    execAsync('xdg-open "https://discord.gg/kasper" 2>/dev/null || open "https://discord.gg/kasper" 2>/dev/null');
+  } else if (c === '2') {
+    console.log('\n  Открываю GitHub Issues...');
+    execAsync('xdg-open "https://github.com/kasper-studios/ddb/issues" 2>/dev/null || open "https://github.com/kasper-studios/ddb/issues" 2>/dev/null');
+  }
+  await pause();
+}
+
+// ── Main TUI Runner ───────────────────────────────────────────────
+
+export async function runTUI() {
+  while (true) {
+    console.clear();
+    printLogo();
+
+    const cfg = await loadConfig();
+    const status = await checkSupervisorStatus();
+    const localIp = getLocalIp();
+
+    console.log('\n  \x1b[1m\x1b[35m=== DDB (Dirom Device Bridge) v3.0.0 ===\x1b[0m');
+    console.log('  \x1b[90mКраш-Шилд Супервайзер & Агент Хоста Цитадели\x1b[0m\n');
+
+    if (status && status.ok) {
+      console.log(`  🟢 \x1b[32mСупервайзер:\x1b[0m АКТИВЕН (:8790, PID: ${status.bridge?.pid || '?'}, аптайм: ${status.uptime}s)`);
+      console.log(`  🖥️  \x1b[36mХост:\x1b[0m ${cfg.host_name} (LAN IP: \x1b[1m${localIp}\x1b[0m, RAM: ${Math.round((status.host?.freemem || 0)/1024/1024)}MB)`);
+      console.log(`  🔑 \x1b[33mAPI Ключ:\x1b[0m ${cfg.api_key}`);
+      
+      const targetUrl = cfg.tunnel_type === 'lan' ? `http://${localIp}:${SUPERVISOR_PORT}` : (cfg.tunnel_url || 'Cloud Tunnel');
+      console.log(`\n  \x1b[1m\x1b[32m👉 СКОПИРУЙТЕ ДЛЯ ДИРОМА:\x1b[0m`);
+      console.log(`  \x1b[1m\x1b[33mdevice.reg(name='${cfg.host_name}', url='${targetUrl}', key='${cfg.api_key}')\x1b[0m`);
+    } else {
+      console.log(`  🔴 \x1b[31mСупервайзер:\x1b[0m НЕ ЗАПУЩЕН (порт :${SUPERVISOR_PORT} свободен)`);
+    }
+
+    console.log('\n  \x1b[1mМеню управления:\x1b[0m');
+    console.log('  \x1b[33m[1]\x1b[0m 🚀 Запустить DDB Супервайзер в фоне');
+    console.log('  \x1b[33m[2]\x1b[0m 🔒 Настройка разрешений (Permissions Matrix)');
+    console.log('  \x1b[33m[3]\x1b[0m 🌐 Настройка сети и туннелей');
+    console.log('  \x1b[43m\x1b[30m[4]\x1b[0m ⚙️  Установить в автозагрузку (systemd --user)');
+    console.log('  \x1b[33m[5]\x1b[0m 📊 Проверить статус хоста и Hermes');
+    console.log('  \x1b[33m[6]\x1b[0m 🔄 Перезапустить DDB Bridge воркер');
+    console.log('  \x1b[33m[7]\x1b[0m 💡 Обратная связь / Сообщить об ошибке');
+    console.log('  \x1b[33m[8]\x1b[0m 🛑 Остановить DDB Супервайзер');
+    console.log('  \x1b[90m[0]\x1b[0m ❌ Выход\n');
+
+    const choice = await ask('  > ');
+
+    if (choice === '1') {
       console.log('\n🚀 Запускаю супервайзер...');
       const child = spawn(process.execPath, [SUPERVISOR_SCRIPT], {
         detached: true,
@@ -140,31 +294,31 @@ export async function runTUI() {
       });
       child.unref();
       await new Promise((r) => setTimeout(r, 1500));
-      const s = await checkSupervisorStatus();
-      if (s && s.ok) {
-        console.log('✅ Супервайзер успешно запущен на порту :8790!');
-      } else {
-        console.log('⚠️  Супервайзер запущен в фоне (проверьте порт :8790).');
-      }
-    } else if (c === '2') {
+      await pause();
+    } else if (choice === '2') {
+      await permissionsMenu();
+    } else if (choice === '3') {
+      await tunnelMenu();
+    } else if (choice === '4') {
       console.log('\n⚙️  Настраиваю автозагрузку systemd --user...');
       const res = await installSystemd();
       if (res.ok) console.log(`✅ ${res.message}`);
       else console.log(`❌ Ошибка: ${res.error}`);
-    } else if (c === '3') {
+      await pause();
+    } else if (choice === '5') {
       console.log('\n📊 Запрашиваю статус...');
       const s = await checkSupervisorStatus();
-      if (s) {
-        console.log(JSON.stringify(s, null, 2));
-      } else {
-        console.log('❌ Супервайзер недоступен.');
-      }
-    } else if (c === '4') {
+      console.log(JSON.stringify(s || { error: 'Супервайзер оффлайн' }, null, 2));
+      await pause();
+    } else if (choice === '6') {
       console.log('\n🔄 Перезапускаю воркер Bridge...');
       const res = await postSupervisor('/restart');
       if (res && res.ok) console.log('✅ Воркер перезапущен!');
       else console.log('❌ Не удалось перезапустить.');
-    } else if (c === '5') {
+      await pause();
+    } else if (choice === '7') {
+      await feedbackMenu();
+    } else if (choice === '8') {
       console.log('\n🛑 Останавливаю супервайзер...');
       try {
         await execAsync(`kill $(lsof -ti :${SUPERVISOR_PORT}) 2>/dev/null`);
@@ -172,18 +326,10 @@ export async function runTUI() {
       } catch {
         console.log('Супервайзер уже был неактивен.');
       }
-    } else if (c === '0') {
+      await pause();
+    } else if (choice === '0') {
       console.log('\nДо встречи, какун! 👋');
       process.exit(0);
-    } else {
-      console.log('\nНеверный выбор.');
     }
-
-    console.log('\nНажмите Enter для возврата в меню...');
-    const pause = readline.createInterface({ input: process.stdin, output: process.stdout });
-    pause.question('', () => {
-      pause.close();
-      runTUI();
-    });
-  });
+  }
 }
