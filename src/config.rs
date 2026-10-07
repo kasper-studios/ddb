@@ -10,6 +10,8 @@ pub struct DdbConfig {
     pub tunnel_type: String,
     pub tunnel_token: String,
     pub tunnel_url: String,
+    #[serde(default)]
+    pub streamer_mode: bool,
     pub permissions: PermissionsConfig,
 }
 
@@ -74,6 +76,7 @@ impl Default for DdbConfig {
             tunnel_type: "lan".to_string(),
             tunnel_token: String::new(),
             tunnel_url: String::new(),
+            streamer_mode: false,
             permissions: PermissionsConfig::default(),
         }
     }

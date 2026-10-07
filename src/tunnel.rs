@@ -25,7 +25,7 @@ pub async fn run_tunnel_manager(
         if tunnel_type != last_type || tunnel_token != last_token {
             if let Some(mut child) = current_child.take() {
                 let _ = child.kill().await;
-                println!("[TUNNEL] Предыдущий туннельный процесс остановлен.");
+                crate::logger::log(crate::logger::LogLevel::Tunnel, "[TUNNEL] Предыдущий туннельный процесс остановлен.");
             }
 
             last_type = tunnel_type.clone();
@@ -33,7 +33,7 @@ pub async fn run_tunnel_manager(
 
             match tunnel_type.as_str() {
                 "cloudflare" => {
-                    println!("[TUNNEL] Запуск Cloudflare Tunnel...");
+                    crate::logger::log(crate::logger::LogLevel::Tunnel, "[TUNNEL] Запуск Cloudflare Tunnel...");
                     let mut cmd = Command::new("cloudflared");
 
                     if !tunnel_token.trim().is_empty() {
@@ -59,7 +59,7 @@ pub async fn run_tunnel_manager(
                                             for part in line.split_whitespace() {
                                                 if part.starts_with("https://") && part.contains("trycloudflare.com") {
                                                     let url = part.trim().to_string();
-                                                    println!("[TUNNEL] Cloudflare Tunnel URL обнаружен: {}", url);
+                                                    crate::logger::log(crate::logger::LogLevel::Tunnel, format!("[TUNNEL] Cloudflare Tunnel URL обнаружен: {}", url));
                                                     let mut cfg = cfg_ref.write().await;
                                                     cfg.tunnel_url = url;
                                                     let _ = save_config(&cfg);
@@ -74,13 +74,13 @@ pub async fn run_tunnel_manager(
                             current_child = Some(child);
                         }
                         Err(e) => {
-                            eprintln!("[TUNNEL] Не удалось запустить cloudflared (установлен ли он?): {}", e);
+                            crate::logger::log(crate::logger::LogLevel::Error, format!("[TUNNEL] Не удалось запустить cloudflared (установлен ли он?): {}", e));
                         }
                     }
                 }
 
                 "ngrok" => {
-                    println!("[TUNNEL] Запуск Ngrok Tunnel...");
+                    crate::logger::log(crate::logger::LogLevel::Tunnel, "[TUNNEL] Запуск Ngrok Tunnel...");
                     if !tunnel_token.trim().is_empty() {
                         let _ = Command::new("ngrok")
                             .args(["config", "add-authtoken", tunnel_token.trim()])
@@ -107,7 +107,7 @@ pub async fn run_tunnel_manager(
                                                 for t in tunnels {
                                                     if let Some(p_url) = t.get("public_url").and_then(|v| v.as_str()) {
                                                         if p_url.starts_with("https://") {
-                                                            println!("[TUNNEL] Ngrok URL обнаружен: {}", p_url);
+                                                            crate::logger::log(crate::logger::LogLevel::Tunnel, format!("[TUNNEL] Ngrok URL обнаружен: {}", p_url));
                                                             let mut cfg = cfg_ref.write().await;
                                                             cfg.tunnel_url = p_url.to_string();
                                                             let _ = save_config(&cfg);
@@ -122,7 +122,7 @@ pub async fn run_tunnel_manager(
                             });
                         }
                         Err(e) => {
-                            eprintln!("[TUNNEL] Не удалось запустить ngrok (установлен ли он?): {}", e);
+                            crate::logger::log(crate::logger::LogLevel::Error, format!("[TUNNEL] Не удалось запустить ngrok (установлен ли он?): {}", e));
                         }
                     }
                 }
@@ -136,7 +136,7 @@ pub async fn run_tunnel_manager(
         // Проверяем живы ли запущенные туннели
         if let Some(ref mut child) = current_child {
             if let Ok(Some(status)) = child.try_wait() {
-                println!("[TUNNEL] Туннельный процесс завершился со статусом: {}", status);
+                crate::logger::log(crate::logger::LogLevel::Warn, format!("[TUNNEL] Туннельный процесс завершился со статусом: {}", status));
                 current_child = None;
             }
         }

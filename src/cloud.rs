@@ -171,10 +171,8 @@ pub async fn run_cloud_loop(
                     st.last_error = None;
                 }
 
-                println!(
-                    "[CLOUD] 🚀 Connected to Kasper Cloud at {} as '{}'",
-                    target_url, host_name
-                );
+                let log_msg = format!("[CLOUD] ✓ Connected to {} successfully! Device registered.", target_url);
+                crate::logger::log(crate::logger::LogLevel::Cloud, &log_msg);
 
                 let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
@@ -206,7 +204,7 @@ pub async fn run_cloud_loop(
                     .send(Message::Text(handshake.to_string().into()))
                     .await
                 {
-                    eprintln!("[CLOUD] Handshake send error: {}", e);
+                    crate::logger::log(crate::logger::LogLevel::Error, format!("[CLOUD] Handshake send error: {}", e));
                     CLOUD_CONNECTED.store(false, Ordering::Relaxed);
                     continue;
                 }
@@ -247,7 +245,7 @@ pub async fn run_cloud_loop(
                             });
 
                             if let Err(e) = ws_sender.send(Message::Text(hb_msg.to_string().into())).await {
-                                eprintln!("[CLOUD] Heartbeat send failed: {}", e);
+                                crate::logger::log(crate::logger::LogLevel::Error, format!("[CLOUD] Heartbeat send failed: {}", e));
                                 break;
                             }
                             {
@@ -261,11 +259,11 @@ pub async fn run_cloud_loop(
                             let msg = match msg_opt {
                                 Some(Ok(m)) => m,
                                 Some(Err(e)) => {
-                                    eprintln!("[CLOUD] WebSocket read error: {}", e);
+                                    crate::logger::log(crate::logger::LogLevel::Error, format!("[CLOUD] WebSocket read error: {}", e));
                                     break;
                                 }
                                 None => {
-                                    eprintln!("[CLOUD] WebSocket closed by remote server");
+                                    crate::logger::log(crate::logger::LogLevel::Warn, "[CLOUD] WebSocket closed by remote server");
                                     break;
                                 }
                             };
@@ -327,7 +325,7 @@ pub async fn run_cloud_loop(
                                         };
 
                                         if let Err(e) = ws_sender.send(Message::Text(response_payload.to_string().into())).await {
-                                            eprintln!("[CLOUD] Failed to send RPC response: {}", e);
+                                            crate::logger::log(crate::logger::LogLevel::Error, format!("[CLOUD] Failed to send RPC response: {}", e));
                                             break;
                                         }
 
@@ -341,7 +339,7 @@ pub async fn run_cloud_loop(
                                     let _ = ws_sender.send(Message::Pong(p)).await;
                                 }
                                 Message::Close(_) => {
-                                    println!("[CLOUD] Server sent close frame");
+                                    crate::logger::log(crate::logger::LogLevel::Warn, "[CLOUD] Server sent close frame");
                                     break;
                                 }
                                 _ => {}
@@ -360,7 +358,7 @@ pub async fn run_cloud_loop(
             Err(e) => {
                 CLOUD_CONNECTED.store(false, Ordering::Relaxed);
                 let err_str = format!("Connection failed: {}", e);
-                eprintln!("[CLOUD] ⚠️ Failed to connect to {}: {}", target_url, e);
+                crate::logger::log(crate::logger::LogLevel::Error, format!("[CLOUD] ⚠️ Failed to connect to {}: {}", target_url, e));
                 {
                     let mut st = status_handle.write().await;
                     st.state = "error".to_string();

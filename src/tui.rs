@@ -53,6 +53,7 @@ struct AppState {
 }
 
 pub fn run_tui() -> anyhow::Result<()> {
+    crate::logger::set_tui_running(true);
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -64,8 +65,24 @@ pub fn run_tui() -> anyhow::Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+    crate::logger::set_tui_running(false);
 
     res
+}
+
+fn censor_log_message(msg: &str) -> String {
+    let mut out = msg.to_string();
+    if let Some(idx) = out.find("ks_ddb_") {
+        let rest = &out[idx..];
+        let end = rest.find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '}').unwrap_or(rest.len());
+        out.replace_range(idx..idx + end, "ks_ddb_****************");
+    }
+    if let Some(idx) = out.find("ddb_") {
+        let rest = &out[idx..];
+        let end = rest.find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '}').unwrap_or(rest.len());
+        out.replace_range(idx..idx + end, "ddb_****************");
+    }
+    out
 }
 
 fn get_local_ip() -> String {
@@ -115,19 +132,24 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                 .direction(Direction::Vertical)
                 .margin(1)
                 .constraints([
-                    Constraint::Length(5),  // Header Banner with Logo & Mascot
+                    Constraint::Length(5),  // Header Banner with Logo & Config path
                     Constraint::Length(5),  // Device Quick Info / Registration string
-                    Constraint::Min(12),    // Active Menu / Settings
+                    Constraint::Min(10),    // Active Menu / Settings
+                    Constraint::Length(6),  // Live Event Log Box
                     Constraint::Length(1),  // Footer Navigation Bar
                 ])
                 .split(size);
 
             // ── 1. HEADER BANNER ─────────────────────────────────────
+            let cfg_path_str = crate::config::config_path().to_string_lossy().to_string();
             let header_text = vec![
                 Line::from(vec![
                     Span::styled("⚡ DDB (Dirom Device Bridge) ", Style::default().fg(Color::Rgb(168, 85, 247)).add_modifier(Modifier::BOLD)),
                     Span::styled("v3.0.0-RUST ", Style::default().fg(Color::Rgb(216, 180, 254))),
                     Span::styled("[Инструмент Настройки Хоста]", Style::default().fg(Color::Yellow)),
+                    Span::raw("  │  "),
+                    Span::styled("Конфиг: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(&cfg_path_str, Style::default().fg(Color::Cyan)),
                 ]),
                 Line::from(vec![
                     Span::raw("Суверенный агент устройств Цитадели | "),
@@ -139,6 +161,12 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                         Span::styled("● АКТИВЕН (:8790)", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
                     } else {
                         Span::styled("○ ОФФЛАЙН", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                    },
+                    Span::raw(" | "),
+                    if app.cfg.streamer_mode {
+                        Span::styled("🛡️ STREAMER MODE [ON]", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD))
+                    } else {
+                        Span::styled("STREAMER MODE [OFF] (нажмите 's')", Style::default().fg(Color::DarkGray))
                     },
                 ]),
             ];
@@ -152,15 +180,31 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
             f.render_widget(header, chunks[0]);
 
             // ── 2. REGISTRATION & CONNECTION BAR ─────────────────────
-            let target_url = if !app.cfg.tunnel_url.is_empty() {
-                app.cfg.tunnel_url.clone()
-            } else if app.cfg.tunnel_type == "lan" {
-                format!("http://{}:8790", app.lan_ip)
+            let display_ip = if app.cfg.streamer_mode {
+                "***.***.***.***".to_string()
             } else {
-                format!("http://{}:8790", app.lan_ip)
+                app.lan_ip.clone()
             };
 
-            let reg_cmd = format!("device.reg(name='{}', url='{}', key='{}')", app.cfg.host_name, target_url, app.cfg.api_key);
+            let display_api_key = if app.cfg.streamer_mode {
+                "************************".to_string()
+            } else {
+                app.cfg.api_key.clone()
+            };
+
+            let target_url = if !app.cfg.tunnel_url.is_empty() {
+                if app.cfg.streamer_mode {
+                    "https://***.trycloudflare.com".to_string()
+                } else {
+                    app.cfg.tunnel_url.clone()
+                }
+            } else if app.cfg.tunnel_type == "lan" {
+                format!("http://{}:8790", display_ip)
+            } else {
+                format!("http://{}:8790", display_ip)
+            };
+
+            let reg_cmd = format!("device.reg(name='{}', url='{}', key='{}')", app.cfg.host_name, target_url, display_api_key);
 
             let (status_title, reg_lines) = if app.cfg.tunnel_type == "cloud" {
                 let is_connected = crate::cloud::is_cloud_connected();
@@ -179,7 +223,7 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                         Span::styled("  │  Статус: ", Style::default().fg(Color::DarkGray)),
                         cloud_badge,
                         Span::styled("  │  API Key: ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(&app.cfg.api_key, Style::default().fg(Color::Rgb(168, 85, 247))),
+                        Span::styled(display_api_key, Style::default().fg(Color::Rgb(168, 85, 247))),
                     ]),
                     Line::from(vec![
                         Span::styled("Шлюз: ", Style::default().fg(Color::DarkGray)),
@@ -199,7 +243,7 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                         Span::styled("  │  Адрес: ", Style::default().fg(Color::DarkGray)),
                         Span::styled(&target_url, Style::default().fg(Color::Yellow)),
                         Span::styled("  │  API Key: ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(&app.cfg.api_key, Style::default().fg(Color::Rgb(168, 85, 247))),
+                        Span::styled(display_api_key, Style::default().fg(Color::Rgb(168, 85, 247))),
                     ]),
                     Line::from(vec![
                         Span::styled("Скопируйте для Дирома: ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
@@ -230,13 +274,51 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                 }
             }
 
-            // ── 4. FOOTER COMMAND BAR ────────────────────────────────
+            // ── 4. EVENT LOGS BOX (NEW) ──────────────────────────────
+            let logs = crate::logger::get_recent_logs(5);
+            let log_lines: Vec<Line> = if logs.is_empty() {
+                vec![Line::from(Span::styled("  Ожидание сетевых событий...", Style::default().fg(Color::DarkGray)))]
+            } else {
+                logs.into_iter().map(|entry| {
+                    let level_style = match entry.level {
+                        crate::logger::LogLevel::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        crate::logger::LogLevel::Warn => Style::default().fg(Color::Yellow),
+                        crate::logger::LogLevel::Cloud => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        crate::logger::LogLevel::Tunnel => Style::default().fg(Color::Magenta),
+                        crate::logger::LogLevel::Info => Style::default().fg(Color::White),
+                    };
+
+                    let safe_msg = if app.cfg.streamer_mode {
+                        censor_log_message(&entry.message)
+                    } else {
+                        entry.message
+                    };
+
+                    Line::from(vec![
+                        Span::styled(format!(" [{}] ", entry.timestamp), Style::default().fg(Color::DarkGray)),
+                        Span::styled(safe_msg, level_style),
+                    ])
+                }).collect()
+            };
+
+            let log_widget = Paragraph::new(log_lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Rgb(75, 85, 99)))
+                    .title(Span::styled(" 📜 Журнал Событий Хоста (Live Logs) ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+            );
+            f.render_widget(log_widget, chunks[3]);
+
+            // ── 5. FOOTER COMMAND BAR ────────────────────────────────
             let footer_line = match &app.screen {
                 Screen::MainMenu => Line::from(vec![
                     Span::styled(" [↑ / ↓] ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
                     Span::raw(" Навигация  "),
                     Span::styled(" [Enter / 1-6] ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
                     Span::raw(" Выбрать  "),
+                    Span::styled(" [s] ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(" Streamer Mode  "),
                     Span::styled(" [q / Esc] ", Style::default().fg(Color::Black).bg(Color::Rgb(244, 63, 94)).add_modifier(Modifier::BOLD)),
                     Span::raw(" Выход  "),
                 ]),
@@ -249,6 +331,8 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                     Span::raw(" Изменить токен/URL  "),
                     Span::styled(" [h] ", Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)),
                     Span::raw(" Имя хоста  "),
+                    Span::styled(" [s] ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(" Streamer Mode  "),
                     Span::styled(" [Esc] ", Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD)),
                     Span::raw(" Назад  "),
                 ]),
@@ -265,12 +349,14 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                     Span::raw(" Навигация  "),
                     Span::styled(" [Enter / Пробел] ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
                     Span::raw(" Переключить  "),
+                    Span::styled(" [s] ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(" Streamer Mode  "),
                     Span::styled(" [Esc / 0] ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
                     Span::raw(" Назад в главное меню  "),
                 ]),
             };
             let footer = Paragraph::new(footer_line).style(Style::default().bg(Color::Rgb(17, 24, 39)));
-            f.render_widget(footer, chunks[3]);
+            f.render_widget(footer, chunks[4]);
 
             // Pop-up Notice (if any)
             if let Some((msg, color)) = &app.notice_msg {
@@ -290,6 +376,21 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                 if app.notice_msg.is_some() {
                     app.notice_msg = None;
                     continue;
+                }
+
+                // Хоткей Streamer Mode (работает везде, кроме ввода текста)
+                if key.code == KeyCode::Char('s') {
+                    if !matches!(app.screen, Screen::InputPrompt { .. }) {
+                        app.cfg.streamer_mode = !app.cfg.streamer_mode;
+                        let _ = save_config(&app.cfg);
+                        let msg = if app.cfg.streamer_mode {
+                            "🛡️ STREAMER MODE ВКЛЮЧЕН! (Ключи и IP скрыты звёздочками)".to_string()
+                        } else {
+                            "STREAMER MODE ВЫКЛЮЧЕН (Ключи и IP видны)".to_string()
+                        };
+                        app.notice_msg = Some((msg, Color::Yellow));
+                        continue;
+                    }
                 }
 
                 match &mut app.screen {
@@ -725,26 +826,51 @@ fn render_tunnels_menu(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let current = app.cfg.tunnel_type.as_str();
     let cloud_url_label = if app.cfg.cloud_url.is_empty() { "wss://diromstream.kasperstudios.xyz/api/v1/bridge" } else { &app.cfg.cloud_url };
     let cf_info = if !app.cfg.tunnel_url.is_empty() && current == "cloudflare" {
-        format!("URL: {}", app.cfg.tunnel_url)
+        if app.cfg.streamer_mode {
+            "URL: https://***.trycloudflare.com".to_string()
+        } else {
+            format!("URL: {}", app.cfg.tunnel_url)
+        }
     } else if !app.cfg.tunnel_token.is_empty() {
-        format!("Токен: {}... (нажмите 'e' для изменения)", &app.cfg.tunnel_token.chars().take(12).collect::<String>())
+        if app.cfg.streamer_mode {
+            "Токен: ******************** (нажмите 'e' для изменения)".to_string()
+        } else {
+            format!("Токен: {}... (нажмите 'e' для изменения)", &app.cfg.tunnel_token.chars().take(12).collect::<String>())
+        }
     } else {
         "Подключение по токену или Quick Tunnel (нажмите 'e' для ввода)".to_string()
     };
     let ngrok_info = if !app.cfg.tunnel_url.is_empty() && current == "ngrok" {
-        format!("URL: {}", app.cfg.tunnel_url)
+        if app.cfg.streamer_mode {
+            "URL: https://***.ngrok-free.app".to_string()
+        } else {
+            format!("URL: {}", app.cfg.tunnel_url)
+        }
     } else if !app.cfg.tunnel_token.is_empty() {
-        format!("Authtoken: {}... (нажмите 'e' для изменения)", &app.cfg.tunnel_token.chars().take(12).collect::<String>())
+        if app.cfg.streamer_mode {
+            "Authtoken: ******************** (нажмите 'e' для изменения)".to_string()
+        } else {
+            format!("Authtoken: {}... (нажмите 'e' для изменения)", &app.cfg.tunnel_token.chars().take(12).collect::<String>())
+        }
     } else {
         "Проброс порта :8790 через authtoken ngrok (нажмите 'e' для ввода)".to_string()
     };
     let custom_info = if !app.cfg.tunnel_url.is_empty() {
-        format!("URL: {} (нажмите 'e' для изменения)", app.cfg.tunnel_url)
+        if app.cfg.streamer_mode {
+            "URL: https://***.custom.url (нажмите 'e' для изменения)".to_string()
+        } else {
+            format!("URL: {} (нажмите 'e' для изменения)", app.cfg.tunnel_url)
+        }
     } else {
         "Вручную вставить любой публичный URL туннеля (нажмите 'e' для ввода)".to_string()
     };
 
-    let lan_info = format!("http://{}:8790 (для одной локальной сети с Диромом)", app.lan_ip);
+    let lan_ip_str = if app.cfg.streamer_mode {
+        "***.***.***.***"
+    } else {
+        &app.lan_ip
+    };
+    let lan_info = format!("http://{}:8790 (для одной локальной сети с Диромом)", lan_ip_str);
     let cloud_info = format!("Исходящий WSS к {} [Нажмите 'e' для ключа]", cloud_url_label);
 
     let items = vec![
