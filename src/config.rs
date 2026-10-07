@@ -70,7 +70,7 @@ impl Default for DdbConfig {
         Self {
             host_name: hostname,
             api_key,
-            cloud_url: "wss://api.kasperstudios.xyz/ddb/ws".to_string(),
+            cloud_url: "wss://diromstream.kasperstudios.xyz/api/v1/bridge".to_string(),
             tunnel_type: "lan".to_string(),
             tunnel_token: String::new(),
             tunnel_url: String::new(),

@@ -183,7 +183,7 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                     ]),
                     Line::from(vec![
                         Span::styled("Шлюз: ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(if app.cfg.cloud_url.is_empty() { "wss://api.kasperstudios.xyz/ddb/ws" } else { &app.cfg.cloud_url }, Style::default().fg(Color::Cyan)),
+                        Span::styled(if app.cfg.cloud_url.is_empty() { "wss://diromstream.kasperstudios.xyz/api/v1/bridge" } else { &app.cfg.cloud_url }, Style::default().fg(Color::Cyan)),
                         Span::styled("  │  Диром: ", Style::default().fg(Color::DarkGray)),
                         Span::styled("🪄 Zero-Config активен! Устройство автоматически регистрируется в Цитадели.", Style::default().fg(Color::Green)),
                     ]),
@@ -547,7 +547,7 @@ fn select_tunnel(app: &mut AppState, idx: usize) {
         1 => {
             app.cfg.tunnel_type = "cloud".to_string();
             if app.cfg.cloud_url.is_empty() {
-                app.cfg.cloud_url = "wss://api.kasperstudios.xyz/ddb/ws".to_string();
+                app.cfg.cloud_url = "wss://diromstream.kasperstudios.xyz/api/v1/bridge".to_string();
             }
         }
         2 => app.cfg.tunnel_type = "cloudflare".to_string(),
@@ -718,7 +718,7 @@ fn make_perm_item<'a>(num: &'a str, title: &'a str, desc: &'a str, enabled: bool
 
 fn render_tunnels_menu(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let current = app.cfg.tunnel_type.as_str();
-    let cloud_url_label = if app.cfg.cloud_url.is_empty() { "wss://api.kasperstudios.xyz/ddb/ws" } else { &app.cfg.cloud_url };
+    let cloud_url_label = if app.cfg.cloud_url.is_empty() { "wss://diromstream.kasperstudios.xyz/api/v1/bridge" } else { &app.cfg.cloud_url };
     let cf_info = if !app.cfg.tunnel_url.is_empty() && current == "cloudflare" {
         format!("URL: {}", app.cfg.tunnel_url)
     } else if !app.cfg.tunnel_token.is_empty() {
