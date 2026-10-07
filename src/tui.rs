@@ -23,7 +23,6 @@ enum Screen {
     MainMenu,
     Permissions,
     Tunnels,
-    SystemdInstall,
     Feedback,
     InputPrompt {
         title: String,
@@ -49,6 +48,7 @@ struct AppState {
     cfg: DdbConfig,
     notice_msg: Option<(String, Color)>,
     supervisor_active: bool,
+    autostart_enabled: bool,
     lan_ip: String,
 }
 
@@ -113,6 +113,7 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
         cfg: load_config(),
         notice_msg: None,
         supervisor_active: check_daemon_online(),
+        autostart_enabled: check_autostart_enabled(),
         lan_ip: get_local_ip(),
     };
 
@@ -121,6 +122,7 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
     loop {
         if last_check.elapsed() > Duration::from_secs(2) {
             app.supervisor_active = check_daemon_online();
+            app.autostart_enabled = check_autostart_enabled();
             last_check = std::time::Instant::now();
         }
 
@@ -267,7 +269,6 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                 Screen::MainMenu => render_main_menu(f, chunks[2], &app),
                 Screen::Permissions => render_permissions_menu(f, chunks[2], &app),
                 Screen::Tunnels => render_tunnels_menu(f, chunks[2], &app),
-                Screen::SystemdInstall => render_systemd_menu(f, chunks[2], &app),
                 Screen::Feedback => render_feedback_menu(f, chunks[2], &app),
                 Screen::InputPrompt { title, prompt, buffer, .. } => {
                     render_input_prompt(f, chunks[2], title, prompt, buffer);
@@ -547,17 +548,6 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                         _ => {}
                     },
 
-                    Screen::SystemdInstall => match key.code {
-                        KeyCode::Esc | KeyCode::Char('0') => {
-                            app.screen = Screen::MainMenu;
-                            app.selected_index = 2;
-                        }
-                        KeyCode::Enter | KeyCode::Char('y') => {
-                            run_systemd_install(&mut app);
-                        }
-                        _ => {}
-                    },
-
                     Screen::Feedback => match key.code {
                         KeyCode::Esc | KeyCode::Char('0') => {
                             app.screen = Screen::MainMenu;
@@ -603,28 +593,20 @@ fn open_menu_item(app: &mut AppState, idx: usize) {
             };
         }
         2 => {
-            app.screen = Screen::SystemdInstall;
-            app.selected_index = 0;
+            // Интерактивный TOGGLE автозагрузки
+            toggle_autostart(app);
         }
         3 => {
-            // Перезапуск службы
-            let _ = std::process::Command::new("systemctl")
-                .args(["--user", "restart", "ddb-supervisor"])
-                .status();
-            app.supervisor_active = check_daemon_online();
-            app.notice_msg = Some(("Служба ddb-supervisor успешно перезапущена!".into(), Color::Green));
+            // Перезапуск службы / воркера
+            restart_daemon(app);
         }
         4 => {
             app.screen = Screen::Feedback;
             app.selected_index = 0;
         }
         5 => {
-            // Остановка
-            let _ = std::process::Command::new("systemctl")
-                .args(["--user", "stop", "ddb-supervisor"])
-                .status();
-            app.supervisor_active = check_daemon_online();
-            app.notice_msg = Some(("Служба ddb-supervisor остановлена.".into(), Color::Yellow));
+            // Остановка службы / воркера
+            stop_daemon(app);
         }
         _ => {}
     }
@@ -706,6 +688,140 @@ fn open_tunnel_input(app: &mut AppState, idx: usize) {
     }
 }
 
+fn check_autostart_enabled() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let output = std::process::Command::new("reg")
+            .args(["query", r#"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"#, "/v", "DDB"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        if let Ok(out) = output {
+            return out.status.success();
+        }
+        false
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let output = std::process::Command::new("systemctl")
+            .args(["--user", "is-enabled", "ddb-supervisor"])
+            .output();
+        if let Ok(out) = output {
+            let text = String::from_utf8_lossy(&out.stdout);
+            return text.trim() == "enabled";
+        }
+        false
+    }
+}
+
+fn toggle_autostart(app: &mut AppState) {
+    let current = check_autostart_enabled();
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        if current {
+            let _ = std::process::Command::new("reg")
+                .args(["delete", r#"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"#, "/v", "DDB", "/f"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
+            app.autostart_enabled = check_autostart_enabled();
+            app.notice_msg = Some(("Автозагрузка DDB на Windows выключена.".into(), Color::Yellow));
+            crate::logger::log(crate::logger::LogLevel::Info, "[AUTOSTART] Автозагрузка DDB в реестре Windows отключена.");
+        } else {
+            if let Ok(exe) = std::env::current_exe() {
+                let cmd_str = format!("\"{}\" --daemon", exe.to_string_lossy());
+                let _ = std::process::Command::new("reg")
+                    .args(["add", r#"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"#, "/v", "DDB", "/t", "REG_SZ", "/d", &cmd_str, "/f"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .status();
+            }
+            app.autostart_enabled = check_autostart_enabled();
+            app.notice_msg = Some(("Автозагрузка DDB в реестр Windows [ВКЛЮЧЕНА]!".into(), Color::Green));
+            crate::logger::log(crate::logger::LogLevel::Info, "[AUTOSTART] Автозагрузка DDB в реестр Windows успешно добавлена.");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if current {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "disable", "--now", "ddb-supervisor"])
+                .status();
+            app.autostart_enabled = check_autostart_enabled();
+            app.supervisor_active = check_daemon_online();
+            app.notice_msg = Some(("Автозагрузка ddb-supervisor выключена.".into(), Color::Yellow));
+            crate::logger::log(crate::logger::LogLevel::Info, "[AUTOSTART] Автозагрузка ddb-supervisor отключена в systemd.");
+        } else {
+            run_systemd_install(app);
+            app.autostart_enabled = check_autostart_enabled();
+            crate::logger::log(crate::logger::LogLevel::Info, "[AUTOSTART] Автозагрузка ddb-supervisor включена в systemd.");
+        }
+    }
+}
+
+fn restart_daemon(app: &mut AppState) {
+    #[cfg(target_os = "windows")]
+    {
+        stop_windows_daemon();
+        if let Ok(exe) = std::env::current_exe() {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let _ = std::process::Command::new(exe)
+                .arg("--daemon")
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn();
+        }
+        std::thread::sleep(Duration::from_millis(600));
+        app.supervisor_active = check_daemon_online();
+        app.notice_msg = Some(("Фоновый воркер DDB на Windows успешно перезапущен!".into(), Color::Green));
+        crate::logger::log(crate::logger::LogLevel::Info, "[DAEMON] Фоновый воркер DDB на Windows перезапущен.");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "restart", "ddb-supervisor"])
+            .status();
+        app.supervisor_active = check_daemon_online();
+        app.notice_msg = Some(("Служба ddb-supervisor успешно перезапущена!".into(), Color::Green));
+        crate::logger::log(crate::logger::LogLevel::Info, "[DAEMON] Служба ddb-supervisor перезапущена через systemctl.");
+    }
+}
+
+fn stop_daemon(app: &mut AppState) {
+    #[cfg(target_os = "windows")]
+    {
+        stop_windows_daemon();
+        std::thread::sleep(Duration::from_millis(400));
+        app.supervisor_active = check_daemon_online();
+        app.notice_msg = Some(("Фоновые процессы DDB на Windows остановлены.".into(), Color::Yellow));
+        crate::logger::log(crate::logger::LogLevel::Warn, "[DAEMON] Фоновые процессы DDB на Windows остановлены.");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "stop", "ddb-supervisor"])
+            .status();
+        app.supervisor_active = check_daemon_online();
+        app.notice_msg = Some(("Служба ddb-supervisor остановлена.".into(), Color::Yellow));
+        crate::logger::log(crate::logger::LogLevel::Warn, "[DAEMON] Служба ddb-supervisor остановлена через systemctl.");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn stop_windows_daemon() {
+    let my_pid = std::process::id();
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    for exe_name in &["ddb.exe", "ddb-windows-x64.exe"] {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", exe_name, "/FI", &format!("PID ne {}", my_pid)])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
 fn run_systemd_install(app: &mut AppState) {
     if let Ok(exe) = std::env::current_exe() {
         let exe_str = exe.to_string_lossy();
@@ -734,13 +850,39 @@ fn run_systemd_install(app: &mut AppState) {
 // ── RENDER MENUS ─────────────────────────────────────────────────────
 
 fn render_main_menu(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
+    let (auto_badge, auto_desc) = if app.autostart_enabled {
+        (
+            Span::styled(" [ВКЛ] ● ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+            if cfg!(target_os = "windows") {
+                "Автозапуск в реестре Windows (HKCU/Run) активен [Нажмите Enter для выключения]"
+            } else {
+                "Служба systemd --user активна [Нажмите Enter для выключения]"
+            }
+        )
+    } else {
+        (
+            Span::styled(" [ВЫКЛ] ○ ", Style::default().fg(Color::White).bg(Color::Rgb(55, 65, 81))),
+            if cfg!(target_os = "windows") {
+                "Добавить DDB в автозапуск Windows (HKCU/Run) [Нажмите Enter для включения]"
+            } else {
+                "Включить службу ddb-supervisor в systemd [Нажмите Enter для включения]"
+            }
+        )
+    };
+
+    let (restart_title, stop_title) = if cfg!(target_os = "windows") {
+        ("Перезапустить процесс DDB (Windows Worker)", "Остановить процессы DDB (Windows Worker)")
+    } else {
+        ("Перезапустить службу DDB Supervisor (systemd)", "Остановить службу DDB Supervisor (systemd)")
+    };
+
     let items = vec![
-        make_menu_item("1", "Настройка прав доступа (Permissions Matrix)", "Включение и выключение шелла, мыши, экрана, файлов, Гермеса", app.selected_index == 0),
-        make_menu_item("2", "Сетевой режим и туннели связи", "Переключение между P2P LAN, Cloudflare, Ngrok, Custom URL и Kasper Cloud", app.selected_index == 1),
-        make_menu_item("3", "Установить в автозагрузку (systemd --user)", "Регистрация ddb-supervisor.service в автозапуск пользователя", app.selected_index == 2),
-        make_menu_item("4", "Перезапустить службу DDB Supervisor", "Быстрый рестарт фонового демона для применения правок", app.selected_index == 3),
-        make_menu_item("5", "Обратная связь / Сообщить о баге", "Переход в Discord сообщество или GitHub Issues", app.selected_index == 4),
-        make_menu_item("6", "Остановить службу DDB Supervisor", "Мягкая остановка фонового демона", app.selected_index == 5),
+        make_menu_item("1", "Настройка прав доступа (Permissions Matrix)", "Включение и выключение шелла, мыши, экрана, файлов, Гермеса", None, app.selected_index == 0),
+        make_menu_item("2", "Сетевой режим и туннели связи", "Переключение между P2P LAN, Cloudflare, Ngrok, Custom URL и Kasper Cloud", None, app.selected_index == 1),
+        make_menu_item("3", "Автозагрузка системы", auto_desc, Some(auto_badge), app.selected_index == 2),
+        make_menu_item("4", restart_title, "Быстрый рестарт фонового демона/воркера для применения правок", None, app.selected_index == 3),
+        make_menu_item("5", "Обратная связь / Сообщить о баге", "Переход в Discord сообщество или GitHub Issues", None, app.selected_index == 4),
+        make_menu_item("6", stop_title, "Мягкая остановка фонового демона/воркера", None, app.selected_index == 5),
     ];
 
     let list = List::new(items).block(
@@ -753,22 +895,29 @@ fn render_main_menu(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     f.render_widget(list, area);
 }
 
-fn make_menu_item<'a>(num: &'a str, title: &'a str, desc: &'a str, selected: bool) -> ListItem<'a> {
+fn make_menu_item<'a>(num: &'a str, title: &'a str, desc: &'a str, badge: Option<Span<'a>>, selected: bool) -> ListItem<'a> {
     let (prefix, style) = if selected {
         (" ❯ ", Style::default().fg(Color::Rgb(244, 63, 94)).add_modifier(Modifier::BOLD))
     } else {
         ("   ", Style::default().fg(Color::White))
     };
 
+    let mut line_spans = vec![
+        Span::styled(prefix, style),
+        Span::styled(format!("[{}] ", num), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(title, style),
+    ];
+
+    if let Some(b) = badge {
+        line_spans.push(Span::raw(" "));
+        line_spans.push(b);
+    }
+
     ListItem::new(vec![
-        Line::from(vec![
-            Span::styled(prefix, style),
-            Span::styled(format!("[{}] ", num), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled(title, style),
-        ]),
+        Line::from(line_spans),
         Line::from(vec![
             Span::raw("       "),
-            Span::styled(desc, Style::default().fg(Color::DarkGray)),
+            Span::styled(desc.to_string(), Style::default().fg(Color::DarkGray)),
         ]),
         Line::from(""),
     ])
@@ -935,31 +1084,6 @@ fn render_input_prompt(f: &mut ratatui::Frame, area: Rect, title: &str, prompt: 
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Yellow))
             .title(Span::styled(format!(" ✏️ {} ", title), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
-    );
-    f.render_widget(p, area);
-}
-
-fn render_systemd_menu(f: &mut ratatui::Frame, area: Rect, _app: &AppState) {
-    let text = vec![
-        Line::from(Span::styled("⚙️ Установка DDB в автозагрузку пользователя (systemd --user)", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
-        Line::from(""),
-        Line::from("  Служба ddb-supervisor.service будет зарегистрирована в:"),
-        Line::from(Span::styled("  ~/.config/systemd/user/ddb-supervisor.service", Style::default().fg(Color::Cyan))),
-        Line::from(""),
-        Line::from("  При старте системы демон автоматически поднимет порт :8790,"),
-        Line::from("  даже если терминал и TUI закрыты."),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Нажмите [Enter] или [y] для установки, [Esc] для отмены", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        ]),
-    ];
-
-    let p = Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Rgb(147, 51, 234)))
-            .title(" Автозагрузка Systemd ")
     );
     f.render_widget(p, area);
 }
