@@ -92,7 +92,12 @@ pub fn load_config() -> DdbConfig {
     let path = config_path();
     if path.exists() {
         if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(cfg) = serde_json::from_str::<DdbConfig>(&content) {
+            if let Ok(mut cfg) = serde_json::from_str::<DdbConfig>(&content) {
+                // Авто-миграция старого несуществующего домена api.kasperstudios.xyz
+                if cfg.cloud_url.contains("api.kasperstudios.xyz") || cfg.cloud_url.is_empty() {
+                    cfg.cloud_url = "wss://diromstream.kasperstudios.xyz/api/v1/bridge".to_string();
+                    let _ = save_config(&cfg);
+                }
                 return cfg;
             }
         }

@@ -82,7 +82,7 @@ pub async fn run_cloud_loop(
 
         // Подготовка WebSocket URL
         let mut target_url = cloud_url.trim().to_string();
-        if target_url.is_empty() {
+        if target_url.is_empty() || target_url.contains("api.kasperstudios.xyz") {
             target_url = "wss://diromstream.kasperstudios.xyz/api/v1/bridge".to_string();
         }
         if target_url.starts_with("http://") {
