@@ -1,10 +1,12 @@
 mod actions;
+mod cloud;
 mod config;
 #[cfg(feature = "hermes")]
 mod hermes;
 mod pointer;
 mod server;
 mod tui;
+mod tunnel;
 
 use clap::Parser;
 use config::load_config;
@@ -58,6 +60,21 @@ async fn main() -> anyhow::Result<()> {
     // Shutdown cancellation token
     let cancel_token = CancellationToken::new();
     let server_token = cancel_token.clone();
+
+    // Spawn Kasper Cloud API Client loop (Zero-Config Magic)
+    let cloud_config = Arc::clone(&config);
+    let cloud_pointer = app_state.pointer.clone();
+    let cloud_token = cancel_token.clone();
+    tokio::spawn(async move {
+        cloud::run_cloud_loop(cloud_config, cloud_pointer, Instant::now(), cloud_token).await;
+    });
+
+    // Spawn Tunnel Manager (Cloudflare / Ngrok)
+    let tunnel_config = Arc::clone(&config);
+    let tunnel_token = cancel_token.clone();
+    tokio::spawn(async move {
+        tunnel::run_tunnel_manager(tunnel_config, tunnel_token).await;
+    });
 
     // Spawn Axum HTTP server on 0.0.0.0:8790 with graceful shutdown (if not already running)
     let router = create_router(app_state);

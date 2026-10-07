@@ -114,11 +114,18 @@ async fn handle_exec(
         );
     }
 
-    match std::process::Command::new("sh")
+    #[cfg(target_os = "windows")]
+    let cmd_result = std::process::Command::new("cmd")
+        .args(["/C", &cmd_str])
+        .output();
+
+    #[cfg(not(target_os = "windows"))]
+    let cmd_result = std::process::Command::new("sh")
         .arg("-c")
         .arg(&cmd_str)
-        .output()
-    {
+        .output();
+
+    match cmd_result {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();

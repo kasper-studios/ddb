@@ -18,13 +18,29 @@ use std::io;
 use std::net::UdpSocket;
 use std::time::Duration;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Screen {
     MainMenu,
     Permissions,
     Tunnels,
     SystemdInstall,
     Feedback,
+    InputPrompt {
+        title: String,
+        prompt: String,
+        target_field: InputField,
+        buffer: String,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputField {
+    CloudKey,
+    CloudUrl,
+    CloudflareToken,
+    NgrokToken,
+    CustomTunnelUrl,
+    HostName,
 }
 
 struct AppState {
@@ -136,52 +152,86 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
             f.render_widget(header, chunks[0]);
 
             // ── 2. REGISTRATION & CONNECTION BAR ─────────────────────
-            let target_url = if app.cfg.tunnel_type == "lan" {
-                format!("http://{}:8790", app.lan_ip)
-            } else if !app.cfg.tunnel_url.is_empty() {
+            let target_url = if !app.cfg.tunnel_url.is_empty() {
                 app.cfg.tunnel_url.clone()
+            } else if app.cfg.tunnel_type == "lan" {
+                format!("http://{}:8790", app.lan_ip)
             } else {
                 format!("http://{}:8790", app.lan_ip)
             };
 
             let reg_cmd = format!("device.reg(name='{}', url='{}', key='{}')", app.cfg.host_name, target_url, app.cfg.api_key);
 
-            let reg_lines = vec![
-                Line::from(vec![
-                    Span::styled("Хост: ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(&app.cfg.host_name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                    Span::styled("  │  LAN IP: ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(&app.lan_ip, Style::default().fg(Color::Yellow)),
-                    Span::styled("  │  Туннель: ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(&app.cfg.tunnel_type, Style::default().fg(Color::Cyan)),
-                    Span::styled("  │  API Key: ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(&app.cfg.api_key, Style::default().fg(Color::Rgb(168, 85, 247))),
-                ]),
-                Line::from(vec![
-                    Span::styled("Скопируйте для Дирома: ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                    Span::styled(reg_cmd, Style::default().fg(Color::Yellow)),
-                ]),
-            ];
+            let (status_title, reg_lines) = if app.cfg.tunnel_type == "cloud" {
+                let is_connected = crate::cloud::is_cloud_connected();
+                let cloud_badge = if is_connected {
+                    Span::styled("● ПОДКЛЮЧЕНО К ОБЛАКУ (Zero-Config Active)", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                } else {
+                    Span::styled("◌ ПОДКЛЮЧЕНИЕ К ОБЛАКУ...", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                };
+
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled("Хост: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&app.cfg.host_name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                        Span::styled("  │  Режим: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("Kasper Cloud API", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                        Span::styled("  │  Статус: ", Style::default().fg(Color::DarkGray)),
+                        cloud_badge,
+                        Span::styled("  │  API Key: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&app.cfg.api_key, Style::default().fg(Color::Rgb(168, 85, 247))),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Шлюз: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(if app.cfg.cloud_url.is_empty() { "wss://api.kasperstudios.xyz/ddb/ws" } else { &app.cfg.cloud_url }, Style::default().fg(Color::Cyan)),
+                        Span::styled("  │  Диром: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("🪄 Zero-Config активен! Устройство автоматически регистрируется в Цитадели.", Style::default().fg(Color::Green)),
+                    ]),
+                ];
+                (" Kasper Cloud API (Zero-Config) ", lines)
+            } else {
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled("Хост: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&app.cfg.host_name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                        Span::styled("  │  Связь: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&app.cfg.tunnel_type, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                        Span::styled("  │  Адрес: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&target_url, Style::default().fg(Color::Yellow)),
+                        Span::styled("  │  API Key: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&app.cfg.api_key, Style::default().fg(Color::Rgb(168, 85, 247))),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Скопируйте для Дирома: ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                        Span::styled(&reg_cmd, Style::default().fg(Color::Yellow)),
+                    ]),
+                ];
+                (" Параметры Подключения в Диром ", lines)
+            };
+
             let reg_widget = Paragraph::new(reg_lines).block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(Color::Rgb(75, 85, 99)))
-                    .title(Span::styled(" Параметры Подключения в Диром ", Style::default().fg(Color::Cyan)))
+                    .title(Span::styled(status_title, Style::default().fg(Color::Cyan)))
             );
             f.render_widget(reg_widget, chunks[1]);
 
             // ── 3. MAIN WORKSPACE / INTERACTIVE MENU ─────────────────
-            match app.screen {
+            match &app.screen {
                 Screen::MainMenu => render_main_menu(f, chunks[2], &app),
                 Screen::Permissions => render_permissions_menu(f, chunks[2], &app),
                 Screen::Tunnels => render_tunnels_menu(f, chunks[2], &app),
                 Screen::SystemdInstall => render_systemd_menu(f, chunks[2], &app),
                 Screen::Feedback => render_feedback_menu(f, chunks[2], &app),
+                Screen::InputPrompt { title, prompt, buffer, .. } => {
+                    render_input_prompt(f, chunks[2], title, prompt, buffer);
+                }
             }
 
             // ── 4. FOOTER COMMAND BAR ────────────────────────────────
-            let footer_line = match app.screen {
+            let footer_line = match &app.screen {
                 Screen::MainMenu => Line::from(vec![
                     Span::styled(" [↑ / ↓] ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
                     Span::raw(" Навигация  "),
@@ -189,6 +239,26 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                     Span::raw(" Выбрать  "),
                     Span::styled(" [q / Esc] ", Style::default().fg(Color::Black).bg(Color::Rgb(244, 63, 94)).add_modifier(Modifier::BOLD)),
                     Span::raw(" Выход  "),
+                ]),
+                Screen::Tunnels => Line::from(vec![
+                    Span::styled(" [↑ / ↓] ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::raw(" Навигация  "),
+                    Span::styled(" [Enter / 1-5] ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::raw(" Выбрать  "),
+                    Span::styled(" [e] ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(" Изменить токен/URL  "),
+                    Span::styled(" [h] ", Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Span::raw(" Имя хоста  "),
+                    Span::styled(" [Esc] ", Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::raw(" Назад  "),
+                ]),
+                Screen::InputPrompt { .. } => Line::from(vec![
+                    Span::styled(" [Enter] ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::raw(" Сохранить  "),
+                    Span::styled(" [Backspace] ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(" Стереть  "),
+                    Span::styled(" [Esc] ", Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::raw(" Отмена  "),
                 ]),
                 _ => Line::from(vec![
                     Span::styled(" [↑ / ↓] ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -217,7 +287,7 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                     continue;
                 }
 
-                match app.screen {
+                match &mut app.screen {
                     Screen::MainMenu => match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Up => {
@@ -284,7 +354,7 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                             }
                         }
                         KeyCode::Down => {
-                            if app.selected_index < 3 {
+                            if app.selected_index < 4 {
                                 app.selected_index += 1;
                             }
                         }
@@ -292,10 +362,82 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                             let idx = app.selected_index;
                             select_tunnel(&mut app, idx);
                         }
+                        KeyCode::Char('e') | KeyCode::Char('t') => {
+                            let idx = app.selected_index;
+                            open_tunnel_input(&mut app, idx);
+                        }
+                        KeyCode::Char('h') => {
+                            app.screen = Screen::InputPrompt {
+                                title: "Имя устройства (Hostname)".to_string(),
+                                prompt: "Введите имя этого компьютера в Дироме (например, ferox-pc):".to_string(),
+                                target_field: InputField::HostName,
+                                buffer: app.cfg.host_name.clone(),
+                            };
+                        }
+                        KeyCode::Char('u') => {
+                            app.screen = Screen::InputPrompt {
+                                title: "Kasper Cloud WSS URL".to_string(),
+                                prompt: "Введите WSS URL облачного шлюза (по умолчанию: wss://api.kasperstudios.xyz/ddb/ws):".to_string(),
+                                target_field: InputField::CloudUrl,
+                                buffer: app.cfg.cloud_url.clone(),
+                            };
+                        }
                         KeyCode::Char('1') => select_tunnel(&mut app, 0),
                         KeyCode::Char('2') => select_tunnel(&mut app, 1),
                         KeyCode::Char('3') => select_tunnel(&mut app, 2),
                         KeyCode::Char('4') => select_tunnel(&mut app, 3),
+                        KeyCode::Char('5') => select_tunnel(&mut app, 4),
+                        _ => {}
+                    },
+
+                    Screen::InputPrompt { target_field, buffer, .. } => match key.code {
+                        KeyCode::Esc => {
+                            app.screen = Screen::Tunnels;
+                        }
+                        KeyCode::Backspace => {
+                            buffer.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            buffer.push(c);
+                        }
+                        KeyCode::Enter => {
+                            let val = buffer.trim().to_string();
+                            match target_field {
+                                InputField::CloudKey => {
+                                    if !val.is_empty() {
+                                        app.cfg.api_key = val;
+                                        app.notice_msg = Some(("API-ключ обновлен!".into(), Color::Green));
+                                    }
+                                }
+                                InputField::CloudUrl => {
+                                    if !val.is_empty() {
+                                        app.cfg.cloud_url = val;
+                                        app.notice_msg = Some(("Cloud WSS URL обновлен!".into(), Color::Green));
+                                    }
+                                }
+                                InputField::CloudflareToken => {
+                                    app.cfg.tunnel_token = val.clone();
+                                    app.notice_msg = Some(("Токен Cloudflare сохранен!".into(), Color::Green));
+                                }
+                                InputField::NgrokToken => {
+                                    app.cfg.tunnel_token = val.clone();
+                                    app.notice_msg = Some(("Токен Ngrok сохранен!".into(), Color::Green));
+                                }
+                                InputField::CustomTunnelUrl => {
+                                    app.cfg.tunnel_url = val.clone();
+                                    app.cfg.tunnel_type = "custom".to_string();
+                                    app.notice_msg = Some(("Публичный URL сохранен!".into(), Color::Green));
+                                }
+                                InputField::HostName => {
+                                    if !val.is_empty() {
+                                        app.cfg.host_name = val;
+                                        app.notice_msg = Some(("Имя устройства сохранено!".into(), Color::Green));
+                                    }
+                                }
+                            }
+                            let _ = save_config(&app.cfg);
+                            app.screen = Screen::Tunnels;
+                        }
                         _ => {}
                     },
 
@@ -319,13 +461,13 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                             let _ = std::process::Command::new("xdg-open")
                                 .arg("https://discord.gg/kasper")
                                 .spawn();
-                            app.notice_msg = Some(("Открываю Discord Kasper Studios в браузере...".into(), Color::Green));
+                            app.notice_msg = Some(("Открываю Discord...".into(), Color::Cyan));
                         }
                         KeyCode::Char('2') => {
                             let _ = std::process::Command::new("xdg-open")
                                 .arg("https://github.com/kasper-studios/ddb/issues")
                                 .spawn();
-                            app.notice_msg = Some(("Открываю GitHub Issues в браузере...".into(), Color::Green));
+                            app.notice_msg = Some(("Открываю GitHub Issues...".into(), Color::Cyan));
                         }
                         _ => {}
                     },
@@ -350,6 +492,7 @@ fn open_menu_item(app: &mut AppState, idx: usize) {
                 "cloud" => 1,
                 "cloudflare" => 2,
                 "ngrok" => 3,
+                "custom" => 4,
                 _ => 0,
             };
         }
@@ -401,13 +544,60 @@ fn toggle_permission(app: &mut AppState, idx: usize) {
 fn select_tunnel(app: &mut AppState, idx: usize) {
     match idx {
         0 => app.cfg.tunnel_type = "lan".to_string(),
-        1 => app.cfg.tunnel_type = "cloud".to_string(),
+        1 => {
+            app.cfg.tunnel_type = "cloud".to_string();
+            if app.cfg.cloud_url.is_empty() {
+                app.cfg.cloud_url = "wss://api.kasperstudios.xyz/ddb/ws".to_string();
+            }
+        }
         2 => app.cfg.tunnel_type = "cloudflare".to_string(),
         3 => app.cfg.tunnel_type = "ngrok".to_string(),
+        4 => app.cfg.tunnel_type = "custom".to_string(),
         _ => {}
     }
     let _ = save_config(&app.cfg);
     app.notice_msg = Some((format!("Тип туннеля переключен на: '{}'", app.cfg.tunnel_type), Color::Green));
+}
+
+fn open_tunnel_input(app: &mut AppState, idx: usize) {
+    match idx {
+        0 => {
+            app.notice_msg = Some(("Локальная сеть использует авто-определённый локальный IP".into(), Color::Yellow));
+        }
+        1 => {
+            app.screen = Screen::InputPrompt {
+                title: "Kasper Cloud API".to_string(),
+                prompt: "Введите Cloud API ключ (выдан Создателем или Диромом):".to_string(),
+                target_field: InputField::CloudKey,
+                buffer: app.cfg.api_key.clone(),
+            };
+        }
+        2 => {
+            app.screen = Screen::InputPrompt {
+                title: "Cloudflare Tunnel".to_string(),
+                prompt: "Введите токен Cloudflare туннеля (или оставьте пустым для Quick Tunnel):".to_string(),
+                target_field: InputField::CloudflareToken,
+                buffer: app.cfg.tunnel_token.clone(),
+            };
+        }
+        3 => {
+            app.screen = Screen::InputPrompt {
+                title: "Ngrok Tunnel".to_string(),
+                prompt: "Введите ваш Ngrok Authtoken:".to_string(),
+                target_field: InputField::NgrokToken,
+                buffer: app.cfg.tunnel_token.clone(),
+            };
+        }
+        4 => {
+            app.screen = Screen::InputPrompt {
+                title: "Пользовательский URL Туннеля".to_string(),
+                prompt: "Введите публичный URL (например: https://xxx.trycloudflare.com):".to_string(),
+                target_field: InputField::CustomTunnelUrl,
+                buffer: app.cfg.tunnel_url.clone(),
+            };
+        }
+        _ => {}
+    }
 }
 
 fn run_systemd_install(app: &mut AppState) {
@@ -440,7 +630,7 @@ fn run_systemd_install(app: &mut AppState) {
 fn render_main_menu(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let items = vec![
         make_menu_item("1", "Настройка прав доступа (Permissions Matrix)", "Включение и выключение шелла, мыши, экрана, файлов, Гермеса", app.selected_index == 0),
-        make_menu_item("2", "Сетевой режим и туннели связи", "Переключение между P2P LAN, Cloudflare, Ngrok и Kasper Cloud", app.selected_index == 1),
+        make_menu_item("2", "Сетевой режим и туннели связи", "Переключение между P2P LAN, Cloudflare, Ngrok, Custom URL и Kasper Cloud", app.selected_index == 1),
         make_menu_item("3", "Установить в автозагрузку (systemd --user)", "Регистрация ddb-supervisor.service в автозапуск пользователя", app.selected_index == 2),
         make_menu_item("4", "Перезапустить службу DDB Supervisor", "Быстрый рестарт фонового демона для применения правок", app.selected_index == 3),
         make_menu_item("5", "Обратная связь / Сообщить о баге", "Переход в Discord сообщество или GitHub Issues", app.selected_index == 4),
@@ -481,14 +671,14 @@ fn make_menu_item<'a>(num: &'a str, title: &'a str, desc: &'a str, selected: boo
 fn render_permissions_menu(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let p = &app.cfg.permissions;
     let items = vec![
-        make_perm_item("1", "Выполнение шелл-команд (exec)", "Запуск bash/sh команд на хосте", p.exec, app.selected_index == 0),
+        make_perm_item("1", "Выполнение шелл-команд (exec)", "Запуск bash/sh/cmd команд на хосте", p.exec, app.selected_index == 0),
         make_perm_item("2", "Hermes Desktop A2A Synapse", "A2A связь с Гермесом по WebSockets", p.hermes, app.selected_index == 1),
-        make_perm_item("3", "Захват экрана (screen)", "Скриншоты Niri Wayland через grim", p.screen, app.selected_index == 2),
+        make_perm_item("3", "Захват экрана (screen)", "Скриншоты Niri Wayland / DirectX Windows", p.screen, app.selected_index == 2),
         make_perm_item("4", "Файловая система: Чтение (fs.read)", "Чтение файлов с диска хоста", p.fs.read, app.selected_index == 3),
         make_perm_item("5", "Файловая система: Запись (fs.write)", "Создание и перезапись файлов на диске", p.fs.write, app.selected_index == 4),
         make_perm_item("6", "Файловая система: Листинг (fs.list)", "Просмотр содержимого директорий", p.fs.list, app.selected_index == 5),
         make_perm_item("7", "Display Control: Мышь и Клик", "Клики и перемещения курсора Безье", p.display_control.allow_click, app.selected_index == 6),
-        make_perm_item("8", "Display Control: Клавиатура и Ввод", "Ввод текста и хоткеи Niri (ydotool)", p.display_control.allow_keys, app.selected_index == 7),
+        make_perm_item("8", "Display Control: Клавиатура и Ввод", "Ввод текста и хоткеи", p.display_control.allow_keys, app.selected_index == 7),
     ];
 
     let list = List::new(items).block(
@@ -528,11 +718,36 @@ fn make_perm_item<'a>(num: &'a str, title: &'a str, desc: &'a str, enabled: bool
 
 fn render_tunnels_menu(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let current = app.cfg.tunnel_type.as_str();
+    let cloud_url_label = if app.cfg.cloud_url.is_empty() { "wss://api.kasperstudios.xyz/ddb/ws" } else { &app.cfg.cloud_url };
+    let cf_info = if !app.cfg.tunnel_url.is_empty() && current == "cloudflare" {
+        format!("URL: {}", app.cfg.tunnel_url)
+    } else if !app.cfg.tunnel_token.is_empty() {
+        format!("Токен: {}... (нажмите 'e' для изменения)", &app.cfg.tunnel_token.chars().take(12).collect::<String>())
+    } else {
+        "Подключение по токену или Quick Tunnel (нажмите 'e' для ввода)".to_string()
+    };
+    let ngrok_info = if !app.cfg.tunnel_url.is_empty() && current == "ngrok" {
+        format!("URL: {}", app.cfg.tunnel_url)
+    } else if !app.cfg.tunnel_token.is_empty() {
+        format!("Authtoken: {}... (нажмите 'e' для изменения)", &app.cfg.tunnel_token.chars().take(12).collect::<String>())
+    } else {
+        "Проброс порта :8790 через authtoken ngrok (нажмите 'e' для ввода)".to_string()
+    };
+    let custom_info = if !app.cfg.tunnel_url.is_empty() {
+        format!("URL: {} (нажмите 'e' для изменения)", app.cfg.tunnel_url)
+    } else {
+        "Вручную вставить любой публичный URL туннеля (нажмите 'e' для ввода)".to_string()
+    };
+
+    let lan_info = format!("http://{}:8790 (для одной локальной сети с Диромом)", app.lan_ip);
+    let cloud_info = format!("Исходящий WSS к {} [Нажмите 'e' для ключа]", cloud_url_label);
+
     let items = vec![
-        make_tunnel_item("1", "Локальная сеть LAN (Прямой IP)", "Работает без облаков и интернета в одной сети с планшетом", current == "lan", app.selected_index == 0),
-        make_tunnel_item("2", "Kasper Cloud API (Zero-Config Magic)", "Исходящий WSS к api.kasperstudios.xyz без проброса портов", current == "cloud", app.selected_index == 1),
-        make_tunnel_item("3", "Cloudflare Tunnel", "Подключение по токену через официальный cloudflared", current == "cloudflare", app.selected_index == 2),
-        make_tunnel_item("4", "Ngrok Tunnel", "Проброс порта :8790 через authtoken ngrok", current == "ngrok", app.selected_index == 3),
+        make_tunnel_item("1", "Локальная сеть LAN (Прямой IP)", &lan_info, current == "lan", app.selected_index == 0),
+        make_tunnel_item("2", "Kasper Cloud API (Zero-Config Magic)", &cloud_info, current == "cloud", app.selected_index == 1),
+        make_tunnel_item("3", "Cloudflare Tunnel", &cf_info, current == "cloudflare", app.selected_index == 2),
+        make_tunnel_item("4", "Ngrok Tunnel", &ngrok_info, current == "ngrok", app.selected_index == 3),
+        make_tunnel_item("5", "Пользовательский URL (Custom Tunnel URL)", &custom_info, current == "custom", app.selected_index == 4),
     ];
 
     let list = List::new(items).block(
@@ -540,7 +755,7 @@ fn render_tunnels_menu(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Rgb(147, 51, 234)))
-            .title(Span::styled(" [Выбор Способа Связи с Диромом] Нажмите [Enter] для переключения ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+            .title(Span::styled(" [Выбор Способа Связи] [Enter] Выбрать  [e] Изменить токен/URL  [h] Сменить имя хоста ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
     );
     f.render_widget(list, area);
 }
@@ -563,10 +778,34 @@ fn make_tunnel_item<'a>(num: &'a str, title: &'a str, desc: &'a str, active: boo
         ]),
         Line::from(vec![
             Span::raw("       "),
-            Span::styled(desc, Style::default().fg(Color::DarkGray)),
+            Span::styled(desc.to_string(), Style::default().fg(Color::DarkGray)),
         ]),
         Line::from(""),
     ])
+}
+
+fn render_input_prompt(f: &mut ratatui::Frame, area: Rect, title: &str, prompt: &str, buffer: &str) {
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(prompt, Style::default().fg(Color::White))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ❯ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(buffer, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("  Нажмите [Enter] для сохранения, [Esc] для отмены", Style::default().fg(Color::DarkGray))),
+    ];
+
+    let p = Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(Span::styled(format!(" ✏️ {} ", title), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+    );
+    f.render_widget(p, area);
 }
 
 fn render_systemd_menu(f: &mut ratatui::Frame, area: Rect, _app: &AppState) {
