@@ -1,16 +1,20 @@
+#[cfg(target_os = "linux")]
 use evdev::uinput::VirtualDeviceBuilder;
+#[cfg(target_os = "linux")]
 use evdev::{AttributeSet, BusType, EventType, InputEvent, InputId, Key, RelativeAxisType};
 use std::sync::Mutex;
 use std::thread::sleep;
 use std::time::Duration;
 
 pub struct DiromPointer {
+    #[cfg(target_os = "linux")]
     device: Mutex<evdev::uinput::VirtualDevice>,
     current_x: Mutex<f64>,
     current_y: Mutex<f64>,
 }
 
 impl DiromPointer {
+    #[cfg(target_os = "linux")]
     pub fn new() -> anyhow::Result<Self> {
         let mut keys = AttributeSet::<Key>::new();
         keys.insert(Key::BTN_LEFT);
@@ -32,6 +36,14 @@ impl DiromPointer {
         Ok(Self {
             device: Mutex::new(device),
             current_x: Mutex::new(960.0), // Center of 1920x1080
+            current_y: Mutex::new(540.0),
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn new() -> anyhow::Result<Self> {
+        Ok(Self {
+            current_x: Mutex::new(960.0),
             current_y: Mutex::new(540.0),
         })
     }
@@ -88,6 +100,7 @@ impl DiromPointer {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     pub fn click(&self, button: &str) -> anyhow::Result<()> {
         let key = match button {
             "right" => Key::BTN_RIGHT,
@@ -110,12 +123,23 @@ impl DiromPointer {
         Ok(())
     }
 
+    #[cfg(not(target_os = "linux"))]
+    pub fn click(&self, _button: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     fn emit_relative(&self, dx: i32, dy: i32) -> anyhow::Result<()> {
         let mut dev = self.device.lock().unwrap();
         let ev_x = InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_X.0, dx);
         let ev_y = InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_Y.0, dy);
         let syn = InputEvent::new(EventType::SYNCHRONIZATION, 0, 0);
         dev.emit(&[ev_x, ev_y, syn])?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn emit_relative(&self, _dx: i32, _dy: i32) -> anyhow::Result<()> {
         Ok(())
     }
 }
