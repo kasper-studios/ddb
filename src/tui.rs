@@ -281,6 +281,11 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
         // ── EVENT HANDLING ───────────────────────────────────────────
         if event::poll(Duration::from_millis(150))? {
             if let Event::Key(key) = event::read()? {
+                // Игнорируем события Release на Windows во избежание дублирования клавиш
+                if key.kind != event::KeyEventKind::Press {
+                    continue;
+                }
+
                 // Clear notice on key press
                 if app.notice_msg.is_some() {
                     app.notice_msg = None;
