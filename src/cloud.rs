@@ -176,6 +176,24 @@ pub async fn run_cloud_loop(
 
                 let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
+                #[allow(unused_mut)]
+                let mut caps = vec![
+                    "exec",
+                    "screen",
+                    "display_control",
+                    "status",
+                    "diagnostics",
+                    "restart",
+                    "fs.read",
+                    "fs.write",
+                    "fs.list",
+                ];
+                #[cfg(feature = "hermes")]
+                {
+                    caps.push("hermes.sessions");
+                    caps.push("hermes.send");
+                }
+
                 // ── 1. Рукопожатие (Handshake / Registration) ─────────────
                 let handshake = json!({
                     "type": "handshake",
@@ -184,19 +202,7 @@ pub async fn run_cloud_loop(
                     "token": api_key,
                     "os": std::env::consts::OS,
                     "arch": std::env::consts::ARCH,
-                    "capabilities": [
-                        "exec",
-                        "screen",
-                        "display_control",
-                        "status",
-                        "diagnostics",
-                        "restart",
-                        "fs.read",
-                        "fs.write",
-                        "fs.list",
-                        "hermes.sessions",
-                        "hermes.send"
-                    ],
+                    "capabilities": caps,
                     "permissions": permissions
                 });
 

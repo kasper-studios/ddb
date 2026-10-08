@@ -431,7 +431,8 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                             }
                         }
                         KeyCode::Down => {
-                            if app.selected_index < 7 {
+                            let max_idx = if cfg!(feature = "hermes") { 7 } else { 6 };
+                            if app.selected_index < max_idx {
                                 app.selected_index += 1;
                             }
                         }
@@ -446,7 +447,11 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                         KeyCode::Char('5') => toggle_permission(&mut app, 4),
                         KeyCode::Char('6') => toggle_permission(&mut app, 5),
                         KeyCode::Char('7') => toggle_permission(&mut app, 6),
-                        KeyCode::Char('8') => toggle_permission(&mut app, 7),
+                        KeyCode::Char('8') => {
+                            if cfg!(feature = "hermes") {
+                                toggle_permission(&mut app, 7);
+                            }
+                        }
                         _ => {}
                     },
 
@@ -614,6 +619,7 @@ fn open_menu_item(app: &mut AppState, idx: usize) {
 
 fn toggle_permission(app: &mut AppState, idx: usize) {
     let p = &mut app.cfg.permissions;
+    #[cfg(feature = "hermes")]
     match idx {
         0 => p.exec = !p.exec,
         1 => p.hermes = !p.hermes,
@@ -625,8 +631,19 @@ fn toggle_permission(app: &mut AppState, idx: usize) {
         7 => p.display_control.allow_keys = !p.display_control.allow_keys,
         _ => {}
     }
+    #[cfg(not(feature = "hermes"))]
+    match idx {
+        0 => p.exec = !p.exec,
+        1 => p.screen = !p.screen,
+        2 => p.fs.read = !p.fs.read,
+        3 => p.fs.write = !p.fs.write,
+        4 => p.fs.list = !p.fs.list,
+        5 => p.display_control.allow_click = !p.display_control.allow_click,
+        6 => p.display_control.allow_keys = !p.display_control.allow_keys,
+        _ => {}
+    }
     let _ = save_config(&app.cfg);
-    app.notice_msg = Some(("Настройки прав сохранены в ~/.config/ddb/config.json".into(), Color::Green));
+    app.notice_msg = Some(("Настройки прав сохранены в config.json".into(), Color::Green));
 }
 
 fn select_tunnel(app: &mut AppState, idx: usize) {
@@ -925,6 +942,7 @@ fn make_menu_item<'a>(num: &'a str, title: &'a str, desc: &'a str, badge: Option
 
 fn render_permissions_menu(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let p = &app.cfg.permissions;
+    #[cfg(feature = "hermes")]
     let items = vec![
         make_perm_item("1", "Выполнение шелл-команд (exec)", "Запуск bash/sh/cmd команд на хосте", p.exec, app.selected_index == 0),
         make_perm_item("2", "Hermes Desktop A2A Synapse", "A2A связь с Гермесом по WebSockets", p.hermes, app.selected_index == 1),
@@ -934,6 +952,16 @@ fn render_permissions_menu(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
         make_perm_item("6", "Файловая система: Листинг (fs.list)", "Просмотр содержимого директорий", p.fs.list, app.selected_index == 5),
         make_perm_item("7", "Display Control: Мышь и Клик", "Клики и перемещения курсора Безье", p.display_control.allow_click, app.selected_index == 6),
         make_perm_item("8", "Display Control: Клавиатура и Ввод", "Ввод текста и хоткеи", p.display_control.allow_keys, app.selected_index == 7),
+    ];
+    #[cfg(not(feature = "hermes"))]
+    let items = vec![
+        make_perm_item("1", "Выполнение шелл-команд (exec)", "Запуск bash/sh/cmd команд на хосте", p.exec, app.selected_index == 0),
+        make_perm_item("2", "Захват экрана (screen)", "Скриншоты Niri Wayland / DirectX Windows", p.screen, app.selected_index == 1),
+        make_perm_item("3", "Файловая система: Чтение (fs.read)", "Чтение файлов с диска хоста", p.fs.read, app.selected_index == 2),
+        make_perm_item("4", "Файловая система: Запись (fs.write)", "Создание и перезапись файлов на диске", p.fs.write, app.selected_index == 3),
+        make_perm_item("5", "Файловая система: Листинг (fs.list)", "Просмотр содержимого директорий", p.fs.list, app.selected_index == 4),
+        make_perm_item("6", "Display Control: Мышь и Клик", "Клики и перемещения курсора Безье", p.display_control.allow_click, app.selected_index == 5),
+        make_perm_item("7", "Display Control: Клавиатура и Ввод", "Ввод текста и хоткеи", p.display_control.allow_keys, app.selected_index == 6),
     ];
 
     let list = List::new(items).block(
