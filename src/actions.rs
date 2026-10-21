@@ -332,12 +332,9 @@ $bmp.Dispose()
                             ptr.click(btn)?;
                             Ok(json!({ "handled": true, "method": "uinput_bezier", "x": x, "y": y, "button": btn }))
                         } else {
-                            // Fallback ydotool
-                            let _ = Command::new("ydotool")
-                                .args(["mousemove", "--absolute", &x.to_string(), &y.to_string()])
-                                .spawn();
-                            let _ = Command::new("ydotool").args(["click", "0xC0"]).spawn();
-                            Ok(json!({ "handled": true, "method": "ydotool_fallback", "x": x, "y": y }))
+                            let rel_x = x as i32;
+                            let rel_y = y as i32;
+                            Ok(json!({ "handled": true, "method": "no_pointer_fallback", "x": rel_x, "y": rel_y }))
                         }
                     }
                 }
@@ -360,10 +357,9 @@ $bmp.Dispose()
                             ptr.move_to(x, y, duration)?;
                             Ok(json!({ "handled": true, "method": "uinput_bezier_move", "x": x, "y": y }))
                         } else {
-                            let _ = Command::new("ydotool")
-                                .args(["mousemove", "--absolute", &x.to_string(), &y.to_string()])
-                                .spawn();
-                            Ok(json!({ "handled": true, "method": "ydotool_move", "x": x, "y": y }))
+                            let rel_x = x as i32;
+                            let rel_y = y as i32;
+                            Ok(json!({ "handled": true, "method": "no_pointer_fallback", "x": rel_x, "y": rel_y }))
                         }
                     }
                 }

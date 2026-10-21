@@ -35,9 +35,10 @@ impl DiromPointer {
             .with_relative_axes(&rels)?
             .build()?;
 
+        // Center on screen
         Ok(Self {
             device: Mutex::new(device),
-            current_x: Mutex::new(960.0), // Center of 1920x1080
+            current_x: Mutex::new(960.0),
             current_y: Mutex::new(540.0),
         })
     }
