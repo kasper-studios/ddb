@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::thread::sleep;
 use std::time::Duration;
 
+#[allow(unused_variables)]
 pub struct DiromPointer {
     #[cfg(target_os = "linux")]
     device: Mutex<evdev::uinput::VirtualDevice>,
@@ -13,6 +14,7 @@ pub struct DiromPointer {
     current_y: Mutex<f64>,
 }
 
+#[allow(dead_code)]
 impl DiromPointer {
     #[cfg(target_os = "linux")]
     pub fn new() -> anyhow::Result<Self> {

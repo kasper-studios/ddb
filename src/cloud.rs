@@ -191,6 +191,7 @@ pub async fn run_cloud_loop(
                 #[cfg(feature = "hermes")]
                 {
                     caps.push("hermes.sessions");
+                    caps.push("hermes.messages");
                     caps.push("hermes.send");
                 }
 

@@ -14,6 +14,7 @@ use tokio_tungstenite::connect_async;
 #[cfg(feature = "hermes")]
 use tokio_tungstenite::tungstenite::Message;
 
+#[allow(unused_variables)]
 pub async fn execute_action(
     action: &str,
     params: serde_json::Value,
@@ -135,15 +136,28 @@ pub async fn execute_action(
         "screen" => {
             #[cfg(target_os = "windows")]
             {
-                let ps_script = r#"[Reflection.Assembly]::LoadWithPartialName("System.Drawing") | Out-Null; [Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms") | Out-Null; $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp = New-Object Drawing.Bitmap $bounds.Width, $bounds.Height; $graphics = [Drawing.Graphics]::FromImage($bmp); $graphics.CopyFromScreen($bounds.Location, [Drawing.Point]::Empty, $bounds.Size); $ms = New-Object IO.MemoryStream; $bmp.Save($ms, [Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray())"#;
+                let ps_script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$screen = [System.Windows.Forms.Screen]::PrimaryScreen
+$bounds = $screen.Bounds
+$bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+$ms = New-Object System.IO.MemoryStream
+$bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+$g.Dispose()
+$bmp.Dispose()
+[Convert]::ToBase64String($ms.ToArray())
+"#;
                 let output = Command::new("powershell")
-                    .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
+                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script])
                     .output()?;
                 if !output.status.success() {
                     let err_msg = String::from_utf8_lossy(&output.stderr);
-                    return Err(anyhow::anyhow!("PowerShell screenshot failed: {}", err_msg.trim()));
+                    return Err(anyhow::anyhow!("Windows PowerShell screenshot failed: {}", err_msg.trim()));
                 }
-                let b64 = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let b64 = String::from_utf8_lossy(&output.stdout).replace("\r", "").replace("\n", "").trim().to_string();
                 Ok(json!({ "image_base64": b64, "format": "png" }))
             }
 
@@ -195,11 +209,21 @@ pub async fn execute_action(
                     match sub_action {
                         "key" => {
                             if let Some(key) = item.get("key").and_then(|v| v.as_str()) {
-                                if key.to_lowercase() == "super" || key.starts_with("niri:") {
-                                    let niri_cmd = key.trim_start_matches("niri:");
-                                    let _ = Command::new("niri").args(["msg", "action", niri_cmd]).status();
-                                } else {
-                                    let _ = Command::new("ydotool").args(["key", key]).status();
+                                #[cfg(target_os = "windows")]
+                                {
+                                    let ps_cmd = format!("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')", key);
+                                    let _ = Command::new("powershell")
+                                        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
+                                        .status();
+                                }
+                                #[cfg(not(target_os = "windows"))]
+                                {
+                                    if key.to_lowercase() == "super" || key.starts_with("niri:") {
+                                        let niri_cmd = key.trim_start_matches("niri:");
+                                        let _ = Command::new("niri").args(["msg", "action", niri_cmd]).status();
+                                    } else {
+                                        let _ = Command::new("ydotool").args(["key", key]).status();
+                                    }
                                 }
                                 executed.push(json!({ "action": "key", "key": key }));
                             }
@@ -207,15 +231,36 @@ pub async fn execute_action(
                         "click" => {
                             let x = item.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
                             let y = item.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
-                            let _ = Command::new("ydotool")
-                                .args(["mousemove", "--absolute", &x.to_string(), &y.to_string()])
-                                .status();
-                            let _ = Command::new("ydotool").args(["click", "0xC0"]).status();
+                            #[cfg(target_os = "windows")]
+                            {
+                                let ps_cmd = format!(r#"Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void mouse_event(int flags, int dx, int dy, int cButtons, int extraInfo); [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);' -Name Mouse -Namespace Win32; [Win32.Mouse]::SetCursorPos({}, {}); [Win32.Mouse]::mouse_event(0x02, 0, 0, 0, 0); Start-Sleep -Milliseconds 40; [Win32.Mouse]::mouse_event(0x04, 0, 0, 0, 0)"#, x, y);
+                                let _ = Command::new("powershell")
+                                    .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
+                                    .status();
+                            }
+                            #[cfg(not(target_os = "windows"))]
+                            {
+                                let _ = Command::new("ydotool")
+                                    .args(["mousemove", "--absolute", &x.to_string(), &y.to_string()])
+                                    .status();
+                                let _ = Command::new("ydotool").args(["click", "0xC0"]).status();
+                            }
                             executed.push(json!({ "action": "click", "x": x, "y": y }));
                         }
                         "type" => {
                             let text = item.get("text").and_then(|v| v.as_str()).unwrap_or_default();
-                            let _ = Command::new("ydotool").args(["type", text]).status();
+                            #[cfg(target_os = "windows")]
+                            {
+                                let escaped = text.replace("'", "''");
+                                let ps_cmd = format!("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')", escaped);
+                                let _ = Command::new("powershell")
+                                    .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
+                                    .status();
+                            }
+                            #[cfg(not(target_os = "windows"))]
+                            {
+                                let _ = Command::new("ydotool").args(["type", text]).status();
+                            }
                             executed.push(json!({ "action": "type", "text": text }));
                         }
                         _ => {}
@@ -240,13 +285,24 @@ pub async fn execute_action(
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| anyhow::anyhow!("Missing key"))?;
 
-                    if key.to_lowercase() == "super" || key.starts_with("niri:") {
-                        let niri_cmd = key.trim_start_matches("niri:");
-                        let _ = Command::new("niri").args(["msg", "action", niri_cmd]).spawn();
-                        Ok(json!({ "handled": true, "method": "niri_msg", "key": key }))
-                    } else {
-                        let _ = Command::new("ydotool").args(["key", key]).spawn();
-                        Ok(json!({ "handled": true, "method": "ydotool", "key": key }))
+                    #[cfg(target_os = "windows")]
+                    {
+                        let ps_cmd = format!("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')", key);
+                        let _ = Command::new("powershell")
+                            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
+                            .spawn();
+                        Ok(json!({ "handled": true, "method": "windows_sendkeys", "key": key }))
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        if key.to_lowercase() == "super" || key.starts_with("niri:") {
+                            let niri_cmd = key.trim_start_matches("niri:");
+                            let _ = Command::new("niri").args(["msg", "action", niri_cmd]).spawn();
+                            Ok(json!({ "handled": true, "method": "niri_msg", "key": key }))
+                        } else {
+                            let _ = Command::new("ydotool").args(["key", key]).spawn();
+                            Ok(json!({ "handled": true, "method": "ydotool", "key": key }))
+                        }
                     }
                 }
                 "click" => {
@@ -255,18 +311,34 @@ pub async fn execute_action(
                     let btn = params.get("button").and_then(|v| v.as_str()).unwrap_or("left");
                     let duration = params.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(200);
 
-                    if let Some(ptr) = pointer {
-                        // Smooth human-like Bezier move + Click!
-                        ptr.move_to(x, y, duration)?;
-                        ptr.click(btn)?;
-                        Ok(json!({ "handled": true, "method": "uinput_bezier", "x": x, "y": y, "button": btn }))
-                    } else {
-                        // Fallback ydotool
-                        let _ = Command::new("ydotool")
-                            .args(["mousemove", "--absolute", &x.to_string(), &y.to_string()])
+                    #[cfg(target_os = "windows")]
+                    {
+                        let (down_flag, up_flag) = match btn {
+                            "right" => (0x08, 0x10),
+                            "middle" => (0x20, 0x40),
+                            _ => (0x02, 0x04),
+                        };
+                        let ps_cmd = format!(r#"Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void mouse_event(int flags, int dx, int dy, int cButtons, int extraInfo); [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);' -Name Mouse -Namespace Win32; [Win32.Mouse]::SetCursorPos({}, {}); [Win32.Mouse]::mouse_event({}, 0, 0, 0, 0); Start-Sleep -Milliseconds 40; [Win32.Mouse]::mouse_event({}, 0, 0, 0, 0)"#, x as i64, y as i64, down_flag, up_flag);
+                        let _ = Command::new("powershell")
+                            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
                             .spawn();
-                        let _ = Command::new("ydotool").args(["click", "0xC0"]).spawn();
-                        Ok(json!({ "handled": true, "method": "ydotool_fallback", "x": x, "y": y }))
+                        Ok(json!({ "handled": true, "method": "windows_user32_click", "x": x, "y": y, "button": btn }))
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        if let Some(ptr) = pointer {
+                            // Smooth human-like Bezier move + Click!
+                            ptr.move_to(x, y, duration)?;
+                            ptr.click(btn)?;
+                            Ok(json!({ "handled": true, "method": "uinput_bezier", "x": x, "y": y, "button": btn }))
+                        } else {
+                            // Fallback ydotool
+                            let _ = Command::new("ydotool")
+                                .args(["mousemove", "--absolute", &x.to_string(), &y.to_string()])
+                                .spawn();
+                            let _ = Command::new("ydotool").args(["click", "0xC0"]).spawn();
+                            Ok(json!({ "handled": true, "method": "ydotool_fallback", "x": x, "y": y }))
+                        }
                     }
                 }
                 "move" => {
@@ -274,14 +346,25 @@ pub async fn execute_action(
                     let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let duration = params.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(250);
 
-                    if let Some(ptr) = pointer {
-                        ptr.move_to(x, y, duration)?;
-                        Ok(json!({ "handled": true, "method": "uinput_bezier_move", "x": x, "y": y }))
-                    } else {
-                        let _ = Command::new("ydotool")
-                            .args(["mousemove", "--absolute", &x.to_string(), &y.to_string()])
+                    #[cfg(target_os = "windows")]
+                    {
+                        let ps_cmd = format!(r#"Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);' -Name Mouse -Namespace Win32; [Win32.Mouse]::SetCursorPos({}, {});"#, x as i64, y as i64);
+                        let _ = Command::new("powershell")
+                            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
                             .spawn();
-                        Ok(json!({ "handled": true, "method": "ydotool_move", "x": x, "y": y }))
+                        Ok(json!({ "handled": true, "method": "windows_user32_move", "x": x, "y": y }))
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        if let Some(ptr) = pointer {
+                            ptr.move_to(x, y, duration)?;
+                            Ok(json!({ "handled": true, "method": "uinput_bezier_move", "x": x, "y": y }))
+                        } else {
+                            let _ = Command::new("ydotool")
+                                .args(["mousemove", "--absolute", &x.to_string(), &y.to_string()])
+                                .spawn();
+                            Ok(json!({ "handled": true, "method": "ydotool_move", "x": x, "y": y }))
+                        }
                     }
                 }
                 "type" => {
@@ -289,8 +372,21 @@ pub async fn execute_action(
                         .get("text")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
-                    let _ = Command::new("ydotool").args(["type", text]).spawn();
-                    Ok(json!({ "handled": true, "action": "type", "text": text }))
+
+                    #[cfg(target_os = "windows")]
+                    {
+                        let escaped = text.replace("'", "''");
+                        let ps_cmd = format!("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')", escaped);
+                        let _ = Command::new("powershell")
+                            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
+                            .spawn();
+                        Ok(json!({ "handled": true, "method": "windows_sendkeys", "text": text }))
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        let _ = Command::new("ydotool").args(["type", text]).spawn();
+                        Ok(json!({ "handled": true, "action": "type", "text": text }))
+                    }
                 }
                 _ => Ok(json!({ "handled": false, "error": "Unknown subaction" })),
             }
@@ -304,12 +400,22 @@ pub async fn execute_action(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing sample or url"))?;
 
-            if sample.ends_with(".wav") || sample.ends_with(".ogg") {
-                let _ = Command::new("paplay").arg(sample).spawn();
-            } else {
-                let _ = Command::new("ffplay")
-                    .args(["-nodisp", "-autoexit", sample])
+            #[cfg(target_os = "windows")]
+            {
+                let ps_cmd = format!(r#"Add-Type -AssemblyName System.Media; $p = New-Object System.Media.SoundPlayer('{}'); $p.PlaySync()"#, sample);
+                let _ = Command::new("powershell")
+                    .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
                     .spawn();
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                if sample.ends_with(".wav") || sample.ends_with(".ogg") {
+                    let _ = Command::new("paplay").arg(sample).spawn();
+                } else {
+                    let _ = Command::new("ffplay")
+                        .args(["-nodisp", "-autoexit", sample])
+                        .spawn();
+                }
             }
 
             Ok(json!({ "playing": true, "sample": sample }))
@@ -402,6 +508,49 @@ pub async fn execute_action(
             let port = h.port.unwrap();
             let client = reqwest::Client::new();
             let mut req = client.get(format!("http://127.0.0.1:{}/api/sessions?limit=50", port));
+            if let Some(tok) = &h.token {
+                req = req.header("X-Hermes-Session-Token", tok);
+            }
+            let resp = req.send().await?.json::<serde_json::Value>().await?;
+            Ok(resp)
+        }
+
+        #[cfg(feature = "hermes")]
+        "hermes.messages" => {
+            let h = discover_hermes();
+            if !h.found || h.port.is_none() {
+                return Err(anyhow::anyhow!("Hermes not discovered on host"));
+            }
+            let port = h.port.unwrap();
+            let client = reqwest::Client::new();
+
+            // Если session_id не передан — берем активную или последнюю сессию
+            let mut sid = params.get("session_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            if sid.is_none() {
+                let mut req = client.get(format!("http://127.0.0.1:{}/api/sessions?limit=10", port));
+                if let Some(tok) = &h.token {
+                    req = req.header("X-Hermes-Session-Token", tok);
+                }
+                if let Ok(resp) = req.send().await {
+                    if let Ok(v) = resp.json::<serde_json::Value>().await {
+                        if let Some(sessions) = v.get("sessions").and_then(|s| s.as_array()) {
+                            if let Some(first) = sessions
+                                .iter()
+                                .find(|s| s.get("is_active") == Some(&json!(true)))
+                                .or_else(|| sessions.first())
+                            {
+                                if let Some(id) = first.get("id").and_then(|i| i.as_str()) {
+                                    sid = Some(id.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let session_id = sid.ok_or_else(|| anyhow::anyhow!("No active Hermes session found"))?;
+            let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50);
+            let mut req = client.get(format!("http://127.0.0.1:{}/api/sessions/{}/messages?limit={}", port, session_id, limit));
             if let Some(tok) = &h.token {
                 req = req.header("X-Hermes-Session-Token", tok);
             }
