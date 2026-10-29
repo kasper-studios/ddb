@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HermesInstance {
@@ -20,9 +21,66 @@ impl HermesInstance {
     }
 }
 
-/// Linux discovery via /proc
+/// Linux discovery via ~/.hermes/gateway_state.json or /proc
 #[cfg(target_os = "linux")]
 pub fn discover_hermes() -> HermesInstance {
+    // 1. Fast path: check ~/.hermes/gateway_state.json and gateway.pid
+    if let Some(home) = dirs::home_dir() {
+        let hermes_dir = home.join(".hermes");
+        let state_file = hermes_dir.join("gateway_state.json");
+        let pid_file = hermes_dir.join("gateway.pid");
+
+        if let Ok(state_str) = fs::read_to_string(&state_file) {
+            if let Ok(state) = serde_json::from_str::<serde_json::Value>(&state_str) {
+                let pid = state.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32)
+                    .or_else(|| {
+                        fs::read_to_string(&pid_file).ok().and_then(|s| {
+                            serde_json::from_str::<serde_json::Value>(&s).ok()
+                                .and_then(|v| v.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32))
+                        })
+                    });
+
+                if let Some(p) = pid {
+                    // Check if PID is alive
+                    if PathBuf::from(format!("/proc/{}", p)).exists() {
+                        // Resolve port from listener_base or resolve_listen_port
+                        let mut port = None;
+                        if let Some(platforms) = state.get("platforms").and_then(|pl| pl.as_object()) {
+                            for (_name, plat) in platforms {
+                                if let Some(base) = plat.get("listener_base").and_then(|b| b.as_str()) {
+                                    if let Some(p_str) = base.rsplit(':').next() {
+                                        if let Ok(p_num) = p_str.trim_end_matches('/').parse::<u16>() {
+                                            port = Some(p_num);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if port.is_none() {
+                            port = resolve_listen_port(p);
+                        }
+
+                        let token = state.get("auth_token")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
+                            .or_else(|| read_env_var(p, "HERMES_DASHBOARD_SESSION_TOKEN"))
+                            .or_else(|| Some("unai-local-token".to_string()));
+
+                        return HermesInstance {
+                            found: true,
+                            pid: Some(p),
+                            port,
+                            token,
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Fallback: scan /proc
     let proc_dir = match fs::read_dir("/proc") {
         Ok(dir) => dir,
         Err(_) => return HermesInstance::not_found(),
@@ -40,9 +98,9 @@ pub fn discover_hermes() -> HermesInstance {
         if let Ok(cmd_bytes) = fs::read(&cmdline_path) {
             let cmdline = String::from_utf8_lossy(&cmd_bytes).replace('\0', " ");
             let lc = cmdline.to_lowercase();
-            if lc.contains("hermes") && lc.contains("serve") {
-                // Found Hermes serve process!
-                let token = read_env_var(pid, "HERMES_DASHBOARD_SESSION_TOKEN");
+            if lc.contains("hermes") && (lc.contains("gateway") || lc.contains("serve") || lc.contains("desktop") || lc.contains("hermes-agent")) {
+                let token = read_env_var(pid, "HERMES_DASHBOARD_SESSION_TOKEN")
+                    .or_else(|| Some("unai-local-token".to_string()));
                 let port = resolve_listen_port(pid);
                 return HermesInstance {
                     found: true,
@@ -119,7 +177,7 @@ fn resolve_listen_port(pid: u32) -> Option<u16> {
                 if inodes.contains(&inode) {
                     if let Some((_, port_hex)) = cols[1].split_once(':') {
                         if let Ok(port) = u16::from_str_radix(port_hex, 16) {
-                            if port != 8644 && port != 8790 {
+                            if port != 8790 {
                                 return Some(port);
                             }
                         }

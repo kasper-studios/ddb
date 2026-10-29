@@ -497,61 +497,99 @@ $bmp.Dispose()
         // ── 6. Hermes Desktop Sibling Synapse ───────────────────────
         #[cfg(feature = "hermes")]
         "hermes.sessions" => {
-            let h = discover_hermes();
-            if !h.found || h.port.is_none() {
-                return Err(anyhow::anyhow!("Hermes not discovered on host"));
+            let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+            let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Home directory not found"))?;
+            let db_path = home.join(".hermes/state.db");
+            if !db_path.exists() {
+                return Err(anyhow::anyhow!("Hermes state.db not found at {:?}", db_path));
             }
-            let port = h.port.unwrap();
-            let client = reqwest::Client::new();
-            let mut req = client.get(format!("http://127.0.0.1:{}/api/sessions?limit=50", port));
-            if let Some(tok) = &h.token {
-                req = req.header("X-Hermes-Session-Token", tok);
+
+            let conn = rusqlite::Connection::open_with_flags(
+                &db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+
+            let mut stmt = conn.prepare(
+                "SELECT id, source, title, started_at, ended_at, message_count, cwd, model 
+                 FROM sessions 
+                 ORDER BY started_at DESC 
+                 LIMIT ?1"
+            )?;
+
+            let rows = stmt.query_map([limit], |row| {
+                Ok(json!({
+                    "id": row.get::<_, String>(0)?,
+                    "source": row.get::<_, Option<String>>(1)?,
+                    "title": row.get::<_, Option<String>>(2)?,
+                    "started_at": row.get::<_, Option<f64>>(3)?,
+                    "ended_at": row.get::<_, Option<f64>>(4)?,
+                    "message_count": row.get::<_, Option<i64>>(5)?,
+                    "cwd": row.get::<_, Option<String>>(6)?,
+                    "model": row.get::<_, Option<String>>(7)?,
+                }))
+            })?;
+
+            let mut sessions = Vec::new();
+            for r in rows {
+                sessions.push(r?);
             }
-            let resp = req.send().await?.json::<serde_json::Value>().await?;
-            Ok(resp)
+
+            Ok(json!({ "sessions": sessions, "total": sessions.len() }))
         }
 
         #[cfg(feature = "hermes")]
         "hermes.messages" => {
-            let h = discover_hermes();
-            if !h.found || h.port.is_none() {
-                return Err(anyhow::anyhow!("Hermes not discovered on host"));
+            let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Home directory not found"))?;
+            let db_path = home.join(".hermes/state.db");
+            if !db_path.exists() {
+                return Err(anyhow::anyhow!("Hermes state.db not found at {:?}", db_path));
             }
-            let port = h.port.unwrap();
-            let client = reqwest::Client::new();
 
-            // Если session_id не передан — берем активную или последнюю сессию
-            let mut sid = params.get("session_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-            if sid.is_none() {
-                let mut req = client.get(format!("http://127.0.0.1:{}/api/sessions?limit=10", port));
-                if let Some(tok) = &h.token {
-                    req = req.header("X-Hermes-Session-Token", tok);
-                }
-                if let Ok(resp) = req.send().await {
-                    if let Ok(v) = resp.json::<serde_json::Value>().await {
-                        if let Some(sessions) = v.get("sessions").and_then(|s| s.as_array()) {
-                            if let Some(first) = sessions
-                                .iter()
-                                .find(|s| s.get("is_active") == Some(&json!(true)))
-                                .or_else(|| sessions.first())
-                            {
-                                if let Some(id) = first.get("id").and_then(|i| i.as_str()) {
-                                    sid = Some(id.to_string());
-                                }
-                            }
-                        }
+            let conn = rusqlite::Connection::open_with_flags(
+                &db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+
+            // Resolve target session_id
+            let target_sid = match params.get("session_id").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => {
+                    let mut stmt = conn.prepare("SELECT session_id FROM messages ORDER BY id DESC LIMIT 1")?;
+                    let mut rows = stmt.query([])?;
+                    if let Some(row) = rows.next()? {
+                        row.get::<_, String>(0)?
+                    } else {
+                        return Err(anyhow::anyhow!("No active Hermes sessions found in state.db"));
                     }
                 }
-            }
+            };
 
-            let session_id = sid.ok_or_else(|| anyhow::anyhow!("No active Hermes session found"))?;
-            let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50);
-            let mut req = client.get(format!("http://127.0.0.1:{}/api/sessions/{}/messages?limit={}", port, session_id, limit));
-            if let Some(tok) = &h.token {
-                req = req.header("X-Hermes-Session-Token", tok);
+            let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+            let mut stmt = conn.prepare(
+                "SELECT id, role, content, timestamp, tool_name 
+                 FROM messages 
+                 WHERE session_id = ?1 
+                 ORDER BY id DESC 
+                 LIMIT ?2"
+            )?;
+
+            let rows = stmt.query_map(rusqlite::params![target_sid, limit], |row| {
+                Ok(json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "role": row.get::<_, Option<String>>(1)?,
+                    "content": row.get::<_, Option<String>>(2)?,
+                    "timestamp": row.get::<_, Option<f64>>(3)?,
+                    "tool_name": row.get::<_, Option<String>>(4)?,
+                }))
+            })?;
+
+            let mut messages = Vec::new();
+            for r in rows {
+                messages.push(r?);
             }
-            let resp = req.send().await?.json::<serde_json::Value>().await?;
-            Ok(resp)
+            messages.reverse(); // Chronological order
+
+            Ok(json!({ "session_id": target_sid, "messages": messages, "count": messages.len() }))
         }
 
         #[cfg(feature = "hermes")]

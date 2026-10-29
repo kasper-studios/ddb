@@ -27,6 +27,7 @@ thiserror = "2.0"
 base64 = "0.22"
 rand = "0.9"
 url = "2.5"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12"
