@@ -136,20 +136,7 @@ pub async fn execute_action(
         "screen" => {
             #[cfg(target_os = "windows")]
             {
-                let ps_script = r#"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$screen = [System.Windows.Forms.Screen]::PrimaryScreen
-$bounds = $screen.Bounds
-$bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-$ms = New-Object System.IO.MemoryStream
-$bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-$g.Dispose()
-$bmp.Dispose()
-[Convert]::ToBase64String($ms.ToArray())
-"#;
+                let ps_script = r#"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b = [System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X, $b.Y, 0, 0, $b.Size); $ms = New-Object System.IO.MemoryStream; $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose(); [Convert]::ToBase64String($ms.ToArray())"#;
                 let output = Command::new("powershell")
                     .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script])
                     .output()?;
@@ -158,7 +145,10 @@ $bmp.Dispose()
                     return Err(anyhow::anyhow!("Windows PowerShell screenshot failed: {}", err_msg.trim()));
                 }
                 let b64 = String::from_utf8_lossy(&output.stdout).replace("\r", "").replace("\n", "").trim().to_string();
-                Ok(json!({ "image_base64": b64, "format": "png" }))
+                if b64.is_empty() {
+                    return Err(anyhow::anyhow!("PowerShell returned empty screenshot output"));
+                }
+                Ok(json!({ "base64": b64, "image_base64": b64, "format": "png" }))
             }
 
             #[cfg(not(target_os = "windows"))]
@@ -192,7 +182,7 @@ $bmp.Dispose()
                     &base64::engine::general_purpose::STANDARD,
                     &output.stdout,
                 );
-                Ok(json!({ "image_base64": b64, "format": "png" }))
+                Ok(json!({ "base64": b64, "image_base64": b64, "format": "png" }))
             }
         }
 
