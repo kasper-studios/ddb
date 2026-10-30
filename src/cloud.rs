@@ -345,8 +345,12 @@ pub async fn run_cloud_loop(
                                 Message::Ping(p) => {
                                     let _ = ws_sender.send(Message::Pong(p)).await;
                                 }
-                                Message::Close(_) => {
-                                    crate::logger::log(crate::logger::LogLevel::Warn, "[CLOUD] Server sent close frame");
+                                Message::Close(frame) => {
+                                    if let Some(cf) = frame {
+                                        crate::logger::log(crate::logger::LogLevel::Warn, format!("[CLOUD] Server sent close frame: code={}, reason='{}'", cf.code, cf.reason));
+                                    } else {
+                                        crate::logger::log(crate::logger::LogLevel::Warn, "[CLOUD] Server sent close frame");
+                                    }
                                     break;
                                 }
                                 _ => {}
