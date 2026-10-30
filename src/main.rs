@@ -8,6 +8,7 @@ mod pointer;
 mod server;
 mod tui;
 mod tunnel;
+pub mod updater;
 
 use clap::Parser;
 use config::load_config;
@@ -75,6 +76,16 @@ async fn main() -> anyhow::Result<()> {
     let tunnel_token = cancel_token.clone();
     tokio::spawn(async move {
         tunnel::run_tunnel_manager(tunnel_config, tunnel_token).await;
+    });
+
+    // Фоновая проверка обновлений (без блокировки)
+    tokio::spawn(async {
+        if let Ok(Some(new_ver)) = updater::check_for_updates().await {
+            crate::logger::log(
+                crate::logger::LogLevel::Warn,
+                format!("[UPDATER] 💩 Доступно обновление: {} (текущая: v{})!", new_ver, env!("CARGO_PKG_VERSION"))
+            );
+        }
     });
 
     // Spawn Axum HTTP server on 0.0.0.0:8790 with graceful shutdown (if not already running)

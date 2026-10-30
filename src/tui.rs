@@ -24,6 +24,9 @@ enum Screen {
     Permissions,
     Tunnels,
     Feedback,
+    UpdatePrompt {
+        new_version: String,
+    },
     InputPrompt {
         title: String,
         prompt: String,
@@ -124,6 +127,19 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
             app.supervisor_active = check_daemon_online();
             app.autostart_enabled = check_autostart_enabled();
             last_check = std::time::Instant::now();
+
+            // Проверяем флаг авто-апдейта
+            if crate::updater::UPDATE_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed)
+                && !matches!(app.screen, Screen::UpdatePrompt { .. })
+                && !crate::updater::is_updating()
+            {
+                let new_v = crate::updater::get_latest_version();
+                if !new_v.is_empty() {
+                    app.screen = Screen::UpdatePrompt {
+                        new_version: new_v,
+                    };
+                }
+            }
         }
 
         terminal.draw(|f| {
@@ -266,7 +282,7 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
 
             // ── 3. MAIN WORKSPACE / INTERACTIVE MENU ─────────────────
             match &app.screen {
-                Screen::MainMenu => render_main_menu(f, chunks[2], &app),
+                Screen::MainMenu | Screen::UpdatePrompt { .. } => render_main_menu(f, chunks[2], &app),
                 Screen::Permissions => render_permissions_menu(f, chunks[2], &app),
                 Screen::Tunnels => render_tunnels_menu(f, chunks[2], &app),
                 Screen::Feedback => render_feedback_menu(f, chunks[2], &app),
@@ -363,6 +379,11 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
             if let Some((msg, color)) = &app.notice_msg {
                 render_popup_notice(f, size, msg, *color);
             }
+
+            // Update Dialog / Modal (if available and not already updated)
+            if let Screen::UpdatePrompt { new_version } = &app.screen {
+                render_update_prompt(f, size, new_version);
+            }
         })?;
 
         // ── EVENT HANDLING ───────────────────────────────────────────
@@ -379,9 +400,9 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                     continue;
                 }
 
-                // Хоткей Streamer Mode (работает везде, кроме ввода текста)
+                // Хоткей Streamer Mode (работает везде, кроме ввода текста и модалки апдейта)
                 if key.code == KeyCode::Char('s') {
-                    if !matches!(app.screen, Screen::InputPrompt { .. }) {
+                    if !matches!(app.screen, Screen::InputPrompt { .. } | Screen::UpdatePrompt { .. }) {
                         app.cfg.streamer_mode = !app.cfg.streamer_mode;
                         let _ = save_config(&app.cfg);
                         let msg = if app.cfg.streamer_mode {
@@ -395,6 +416,35 @@ fn tui_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Re
                 }
 
                 match &mut app.screen {
+                    Screen::UpdatePrompt { .. } => match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            tokio::spawn(async move {
+                                let res = crate::updater::perform_update().await;
+                                let _ = tx.send(res);
+                            });
+
+                            app.notice_msg = Some(("Запущен авто-апдейтер... Качаем!".into(), Color::Cyan));
+                            app.screen = Screen::MainMenu;
+                            app.selected_index = 0;
+
+                            // Фоновая обработка финиша апдейта
+                            tokio::spawn(async move {
+                                if let Ok(Ok(())) = rx.await {
+                                    crate::logger::log(
+                                        crate::logger::LogLevel::Info,
+                                        "[UPDATER] ✓ Обновка успешно установлена! Перезапустите DDB."
+                                    );
+                                }
+                            });
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            app.notice_msg = Some(("Обновление отложено (пока сидим на текущей версии)".into(), Color::Yellow));
+                            app.screen = Screen::MainMenu;
+                            app.selected_index = 0;
+                        }
+                        _ => {}
+                    },
                     Screen::MainMenu => match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Up => {
@@ -1169,6 +1219,55 @@ fn render_popup_notice(f: &mut ratatui::Frame, area: Rect, msg: &str, color: Col
             .border_style(Style::default().fg(color))
             .title(" Уведомление ")
     );
+
+    f.render_widget(p, popup_area);
+}
+
+fn render_update_prompt(f: &mut ratatui::Frame, area: Rect, new_version: &str) {
+    let width = 64.min(area.width.saturating_sub(4));
+    let height = 9.min(area.height.saturating_sub(4));
+    let popup_area = Rect {
+        x: (area.width.saturating_sub(width)) / 2,
+        y: (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, popup_area);
+
+    let current_ver = env!("CARGO_PKG_VERSION");
+    let content = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("⚡ ВНИМАНИЕ КАРИФАН! ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled("Выкатили свежий поносик!", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::raw("Версия на GitHub: "),
+            Span::styled(new_version, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw("  (у тебя: "),
+            Span::styled(format!("v{}", current_ver), Style::default().fg(Color::Rgb(244, 63, 94))),
+            Span::raw(")"),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" [Y / Enter] ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(" Накатить авто-апдейт сейчас ", Style::default().fg(Color::White)),
+            Span::raw(" │ "),
+            Span::styled(" [N / Esc] ", Style::default().fg(Color::Black).bg(Color::Rgb(244, 63, 94)).add_modifier(Modifier::BOLD)),
+            Span::styled(" Позже ", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    let p = Paragraph::new(content)
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Double)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(Span::styled(" 💩 Доступно Обновление DDB ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+        );
 
     f.render_widget(p, popup_area);
 }
