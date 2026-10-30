@@ -3,6 +3,7 @@ mod cloud;
 mod config;
 #[cfg(feature = "hermes")]
 mod hermes;
+pub mod keys;
 pub mod logger;
 mod pointer;
 mod server;

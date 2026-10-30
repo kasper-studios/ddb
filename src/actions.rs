@@ -201,7 +201,8 @@ pub async fn execute_action(
                             if let Some(key) = item.get("key").and_then(|v| v.as_str()) {
                                 #[cfg(target_os = "windows")]
                                 {
-                                    let ps_cmd = format!("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')", key);
+                                    let win_key = crate::keys::normalize_windows_sendkeys(key);
+                                    let ps_cmd = format!("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')", win_key);
                                     let _ = Command::new("powershell")
                                         .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
                                         .status();
@@ -277,11 +278,12 @@ pub async fn execute_action(
 
                     #[cfg(target_os = "windows")]
                     {
-                        let ps_cmd = format!("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')", key);
+                        let win_key = crate::keys::normalize_windows_sendkeys(key);
+                        let ps_cmd = format!("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')", win_key);
                         let _ = Command::new("powershell")
                             .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
                             .spawn();
-                        Ok(json!({ "handled": true, "method": "windows_sendkeys", "key": key }))
+                        Ok(json!({ "handled": true, "method": "windows_sendkeys", "key": key, "sendkeys_code": win_key }))
                     }
                     #[cfg(not(target_os = "windows"))]
                     {
