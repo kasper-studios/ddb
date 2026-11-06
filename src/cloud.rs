@@ -222,7 +222,8 @@ pub async fn run_cloud_loop(
                 }
 
                 // ── 2. Двусторонний RPC-мост и Heartbeat ─────────────────
-                let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(15));
+                // 10-12 секунд интервал для предотвращения Cloudflare Tunnel timeout (30-60с)
+                let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(12));
                 heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                 loop {
@@ -232,8 +233,16 @@ pub async fn run_cloud_loop(
                             break;
                         }
 
-                        // Периодический Heartbeat
+                        // Периодический Heartbeat & Ping (Cloudflare keep-alive)
                         _ = heartbeat_interval.tick() => {
+                            // 1. WebSocket Ping на уровне фреймов (Cloudflare edge proxy keepalive)
+                            let ping_payload = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64).to_le_bytes().to_vec();
+                            if let Err(e) = ws_sender.send(Message::Ping(ping_payload.into())).await {
+                                crate::logger::log(crate::logger::LogLevel::Error, format!("[CLOUD] WebSocket Ping frame failed: {}", e));
+                                break;
+                            }
+
+                            // 2. Application-level JSON heartbeat
                             let mut sys = sysinfo::System::new_all();
                             sys.refresh_all();
                             let uptime = uptime_start.elapsed().as_secs();
