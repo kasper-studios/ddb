@@ -14,6 +14,511 @@ use tokio_tungstenite::connect_async;
 #[cfg(feature = "hermes")]
 use tokio_tungstenite::tungstenite::Message;
 
+#[cfg(target_os = "windows")]
+async fn run_win_blocking<F, T>(label: &str, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| anyhow::anyhow!("Windows {} task failed: {}", label, e))?
+}
+
+fn resolve_step_coords(
+    item: &serde_json::Value,
+    default_coord_space: &str,
+    x_key: &str,
+    y_key: &str,
+) -> Result<(f64, f64)> {
+    let raw_x = item.get(x_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let raw_y = item.get(y_key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let space = item
+        .get("coord_space")
+        .and_then(|v| v.as_str())
+        .unwrap_or(default_coord_space);
+    let vbounds = crate::screen::current_virtual_bounds();
+    let last = crate::screen::get_last_screen_transform();
+    crate::screen::map_cua_coords(raw_x, raw_y, space, item, vbounds, last)
+}
+
+fn parse_scroll_deltas(item: &serde_json::Value) -> (i32, i32) {
+    let mut dx = item
+        .get("dx")
+        .or_else(|| item.get("delta_x"))
+        .or_else(|| item.get("scroll_x"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+    let mut dy = item
+        .get("dy")
+        .or_else(|| item.get("delta_y"))
+        .or_else(|| item.get("scroll_y"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+
+    if dx == 0 && dy == 0 {
+        if let Some(dir) = item.get("direction").and_then(|v| v.as_str()) {
+            let amount = item.get("amount").and_then(|v| v.as_i64()).unwrap_or(3).max(1) as i32;
+            match dir.trim().to_ascii_lowercase().as_str() {
+                "up" => dy = amount,
+                "down" => dy = -amount,
+                "left" => dx = -amount,
+                "right" => dx = amount,
+                _ => {}
+            }
+        }
+    }
+    (dx, dy)
+}
+
+#[allow(unused_variables)]
+async fn execute_cua_step(
+    sub_action: &str,
+    item: &serde_json::Value,
+    default_coord_space: &str,
+    pointer: Option<&Arc<DiromPointer>>,
+) -> Result<serde_json::Value> {
+    match sub_action {
+        "click" | "double_click" | "triple_click" | "right_click" | "middle_click" => {
+            let (x, y) = resolve_step_coords(item, default_coord_space, "x", "y")?;
+            let btn = match sub_action {
+                "right_click" => "right",
+                "middle_click" => "middle",
+                _ => item.get("button").and_then(|v| v.as_str()).unwrap_or("left"),
+            };
+            let clicks: u8 = match sub_action {
+                "double_click" => 2,
+                "triple_click" => 3,
+                _ => item
+                    .get("clicks")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1)
+                    .clamp(1, 5) as u8,
+            };
+            let duration = item
+                .get("duration_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(120);
+
+            #[cfg(target_os = "windows")]
+            {
+                let ix = x.round() as i32;
+                let iy = y.round() as i32;
+                let btn_owned = btn.to_string();
+                run_win_blocking("click", move || {
+                    crate::pointer::windows_click(ix, iy, &btn_owned, clicks)
+                })
+                .await?;
+                Ok(json!({
+                    "handled": true,
+                    "action": sub_action,
+                    "method": "windows_sendinput_click",
+                    "x": ix,
+                    "y": iy,
+                    "button": btn,
+                    "clicks": clicks,
+                }))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                if let Some(ptr) = pointer {
+                    let ptr_c = Arc::clone(ptr);
+                    let btn_owned = btn.to_string();
+                    tokio::task::spawn_blocking(move || -> Result<()> {
+                        ptr_c.move_to(x, y, duration)?;
+                        ptr_c.click_count(&btn_owned, clicks)?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Pointer click task failed: {}", e))??;
+                    Ok(json!({
+                        "handled": true,
+                        "action": sub_action,
+                        "method": "uinput_bezier",
+                        "x": x,
+                        "y": y,
+                        "button": btn,
+                        "clicks": clicks,
+                    }))
+                } else {
+                    let ix = x.round() as i32;
+                    let iy = y.round() as i32;
+                    let click_code = match btn {
+                        "right" => "0xC1",
+                        "middle" => "0xC2",
+                        _ => "0xC0",
+                    };
+                    let _ = Command::new("ydotool")
+                        .args(["mousemove", "--absolute", &ix.to_string(), &iy.to_string()])
+                        .status();
+                    for _ in 0..clicks {
+                        let _ = Command::new("ydotool").args(["click", click_code]).status();
+                    }
+                    Ok(json!({
+                        "handled": true,
+                        "action": sub_action,
+                        "method": "ydotool_fallback",
+                        "x": ix,
+                        "y": iy,
+                        "button": btn,
+                        "clicks": clicks,
+                    }))
+                }
+            }
+        }
+
+        "move" => {
+            let (x, y) = resolve_step_coords(item, default_coord_space, "x", "y")?;
+            let duration = item
+                .get("duration_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(180);
+
+            #[cfg(target_os = "windows")]
+            {
+                let ix = x.round() as i32;
+                let iy = y.round() as i32;
+                run_win_blocking("move", move || crate::pointer::windows_move_to(ix, iy)).await?;
+                Ok(json!({
+                    "handled": true,
+                    "action": "move",
+                    "method": "windows_sendinput_move",
+                    "x": ix,
+                    "y": iy,
+                }))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                if let Some(ptr) = pointer {
+                    let ptr_c = Arc::clone(ptr);
+                    tokio::task::spawn_blocking(move || ptr_c.move_to(x, y, duration))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Pointer move task failed: {}", e))??;
+                    Ok(json!({
+                        "handled": true,
+                        "action": "move",
+                        "method": "uinput_bezier_move",
+                        "x": x,
+                        "y": y,
+                    }))
+                } else {
+                    let ix = x.round() as i32;
+                    let iy = y.round() as i32;
+                    let _ = Command::new("ydotool")
+                        .args(["mousemove", "--absolute", &ix.to_string(), &iy.to_string()])
+                        .status();
+                    Ok(json!({
+                        "handled": true,
+                        "action": "move",
+                        "method": "ydotool_fallback",
+                        "x": ix,
+                        "y": iy,
+                    }))
+                }
+            }
+        }
+
+        "mouse_down" | "mouse_up" => {
+            let down = sub_action == "mouse_down";
+            let has_coords = item.get("x").is_some() || item.get("y").is_some();
+            let opt_coords = if has_coords {
+                Some(resolve_step_coords(item, default_coord_space, "x", "y")?)
+            } else {
+                None
+            };
+            let btn = item.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+
+            #[cfg(target_os = "windows")]
+            {
+                let opt_x = opt_coords.map(|(x, _)| x.round() as i32);
+                let opt_y = opt_coords.map(|(_, y)| y.round() as i32);
+                let btn_owned = btn.to_string();
+                run_win_blocking(sub_action, move || {
+                    crate::pointer::windows_mouse_button(opt_x, opt_y, &btn_owned, down)
+                })
+                .await?;
+                Ok(json!({
+                    "handled": true,
+                    "action": sub_action,
+                    "method": "windows_sendinput_button",
+                    "button": btn,
+                    "x": opt_x,
+                    "y": opt_y,
+                }))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                if let Some(ptr) = pointer {
+                    let ptr_c = Arc::clone(ptr);
+                    let btn_owned = btn.to_string();
+                    tokio::task::spawn_blocking(move || -> Result<()> {
+                        if let Some((x, y)) = opt_coords {
+                            ptr_c.move_to(x, y, 80)?;
+                        }
+                        ptr_c.mouse_button(&btn_owned, down)?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Pointer button task failed: {}", e))??;
+                }
+                Ok(json!({
+                    "handled": true,
+                    "action": sub_action,
+                    "button": btn,
+                }))
+            }
+        }
+
+        "drag" => {
+            let from_x_key = if item.get("from_x").is_some() {
+                "from_x"
+            } else if item.get("start_x").is_some() {
+                "start_x"
+            } else {
+                "x"
+            };
+            let from_y_key = if item.get("from_y").is_some() {
+                "from_y"
+            } else if item.get("start_y").is_some() {
+                "start_y"
+            } else {
+                "y"
+            };
+            let to_x_key = if item.get("to_x").is_some() {
+                "to_x"
+            } else {
+                "end_x"
+            };
+            let to_y_key = if item.get("to_y").is_some() {
+                "to_y"
+            } else {
+                "end_y"
+            };
+            if item.get(to_x_key).is_none() || item.get(to_y_key).is_none() {
+                return Err(anyhow::anyhow!(
+                    "Missing drag destination parameters: to_x / to_y"
+                ));
+            }
+            let (fx, fy) = resolve_step_coords(item, default_coord_space, from_x_key, from_y_key)?;
+            let (tx, ty) = resolve_step_coords(item, default_coord_space, to_x_key, to_y_key)?;
+            let btn = item.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+            let duration = item
+                .get("duration_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(280);
+
+            #[cfg(target_os = "windows")]
+            {
+                let ifx = fx.round() as i32;
+                let ify = fy.round() as i32;
+                let itx = tx.round() as i32;
+                let ity = ty.round() as i32;
+                let btn_owned = btn.to_string();
+                run_win_blocking("drag", move || {
+                    crate::pointer::windows_drag(ifx, ify, itx, ity, &btn_owned, duration)
+                })
+                .await?;
+                Ok(json!({
+                    "handled": true,
+                    "action": "drag",
+                    "method": "windows_sendinput_drag",
+                    "from_x": ifx,
+                    "from_y": ify,
+                    "to_x": itx,
+                    "to_y": ity,
+                    "button": btn,
+                }))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                if let Some(ptr) = pointer {
+                    let ptr_c = Arc::clone(ptr);
+                    let btn_owned = btn.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        ptr_c.drag(fx, fy, tx, ty, &btn_owned, duration)
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Pointer drag task failed: {}", e))??;
+                }
+                Ok(json!({
+                    "handled": true,
+                    "action": "drag",
+                    "method": "uinput_bezier_drag",
+                    "from_x": fx,
+                    "from_y": fy,
+                    "to_x": tx,
+                    "to_y": ty,
+                    "button": btn,
+                }))
+            }
+        }
+
+        "scroll" => {
+            let has_coords = item.get("x").is_some() || item.get("y").is_some();
+            let opt_coords = if has_coords {
+                Some(resolve_step_coords(item, default_coord_space, "x", "y")?)
+            } else {
+                None
+            };
+            let (dx, dy) = parse_scroll_deltas(item);
+
+            #[cfg(target_os = "windows")]
+            {
+                let opt_x = opt_coords.map(|(x, _)| x.round() as i32);
+                let opt_y = opt_coords.map(|(_, y)| y.round() as i32);
+                run_win_blocking("scroll", move || {
+                    crate::pointer::windows_scroll(opt_x, opt_y, dx, dy)
+                })
+                .await?;
+                Ok(json!({
+                    "handled": true,
+                    "action": "scroll",
+                    "method": "windows_sendinput_scroll",
+                    "dx": dx,
+                    "dy": dy,
+                    "x": opt_x,
+                    "y": opt_y,
+                }))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                if let Some(ptr) = pointer {
+                    let ptr_c = Arc::clone(ptr);
+                    tokio::task::spawn_blocking(move || -> Result<()> {
+                        if let Some((x, y)) = opt_coords {
+                            ptr_c.move_to(x, y, 80)?;
+                        }
+                        ptr_c.scroll(dx, dy)?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Pointer scroll task failed: {}", e))??;
+                }
+                Ok(json!({
+                    "handled": true,
+                    "action": "scroll",
+                    "method": "uinput_scroll",
+                    "dx": dx,
+                    "dy": dy,
+                }))
+            }
+        }
+
+        "key" => {
+            let key = item
+                .get("key")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Missing key"))?;
+            let repeat = item
+                .get("repeat")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .clamp(1, 50);
+
+            #[cfg(target_os = "windows")]
+            {
+                let key_owned = key.to_string();
+                run_win_blocking("key", move || -> Result<()> {
+                    for _ in 0..repeat {
+                        crate::keys::send_key(&key_owned)?;
+                    }
+                    Ok(())
+                })
+                .await?;
+                Ok(json!({
+                    "handled": true,
+                    "action": "key",
+                    "method": "windows_sendinput_key",
+                    "key": key,
+                    "repeat": repeat,
+                }))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let key_owned = key.to_string();
+                tokio::task::spawn_blocking(move || {
+                    for _ in 0..repeat {
+                        if key_owned.to_lowercase() == "super" || key_owned.starts_with("niri:") {
+                            let niri_cmd = key_owned.trim_start_matches("niri:");
+                            let _ = Command::new("niri").args(["msg", "action", niri_cmd]).status();
+                        } else {
+                            let _ = Command::new("ydotool").args(["key", &key_owned]).status();
+                        }
+                    }
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("Linux key task failed: {}", e))?;
+                Ok(json!({
+                    "handled": true,
+                    "action": "key",
+                    "method": if key.to_lowercase() == "super" || key.starts_with("niri:") { "niri_msg" } else { "ydotool" },
+                    "key": key,
+                    "repeat": repeat,
+                }))
+            }
+        }
+
+        "type" => {
+            let text = item
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+
+            #[cfg(target_os = "windows")]
+            {
+                let text_owned = text.to_string();
+                run_win_blocking("type", move || crate::keys::send_text(&text_owned)).await?;
+                Ok(json!({
+                    "handled": true,
+                    "action": "type",
+                    "method": "windows_sendinput_type",
+                    "text": text,
+                }))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let text_owned = text.to_string();
+                tokio::task::spawn_blocking(move || {
+                    let _ = Command::new("ydotool").args(["type", &text_owned]).status();
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("Linux type task failed: {}", e))?;
+                Ok(json!({
+                    "handled": true,
+                    "action": "type",
+                    "text": text,
+                }))
+            }
+        }
+
+        "wait" | "sleep" => {
+            let ms = item
+                .get("ms")
+                .or_else(|| item.get("duration_ms"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(250)
+                .min(30_000);
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            Ok(json!({
+                "handled": true,
+                "action": "wait",
+                "ms": ms,
+            }))
+        }
+
+        "screen" | "screenshot" => {
+            let captured = crate::screen::capture_screen(item).await?;
+            Ok(json!({
+                "handled": true,
+                "action": "screen",
+                "screen": captured.to_json(),
+            }))
+        }
+
+        _ => Ok(json!({ "handled": false, "error": format!("Unknown subaction '{}'", sub_action) })),
+    }
+}
+
 #[allow(unused_variables)]
 pub async fn execute_action(
     action: &str,
@@ -58,9 +563,16 @@ pub async fn execute_action(
             let uptime = sysinfo::System::uptime();
 
             #[cfg(feature = "hermes")]
-            let (h_found, h_port) = (h.found, h.port);
+            let (h_found, h_port, h_origin, h_state, h_version) = (
+                h.found,
+                h.port,
+                h.api_origin.clone(),
+                h.state.clone(),
+                h.code_version.clone(),
+            );
             #[cfg(not(feature = "hermes"))]
-            let (h_found, h_port) = (false, None::<u16>);
+            let (h_found, h_port, h_origin, h_state, h_version) =
+                (false, None::<u16>, None::<String>, None::<String>, None::<String>);
 
             Ok(json!({
                 "ok": true,
@@ -74,6 +586,9 @@ pub async fn execute_action(
                 "memory_total_mb": sys.total_memory() / 1024 / 1024,
                 "hermes_discovered": h_found,
                 "hermes_port": h_port,
+                "hermes_api_origin": h_origin,
+                "hermes_state": h_state,
+                "hermes_version": h_version,
             }))
         }
 
@@ -134,250 +649,84 @@ pub async fn execute_action(
 
         // ── 3. Screen & Display Control ─────────────────────────────
         "screen" => {
-            #[cfg(target_os = "windows")]
-            {
-                let ps_script = r#"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b = [System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X, $b.Y, 0, 0, $b.Size); $ms = New-Object System.IO.MemoryStream; $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose(); [Convert]::ToBase64String($ms.ToArray())"#;
-                let output = Command::new("powershell")
-                    .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script])
-                    .output()?;
-                if !output.status.success() {
-                    let err_msg = String::from_utf8_lossy(&output.stderr);
-                    return Err(anyhow::anyhow!("Windows PowerShell screenshot failed: {}", err_msg.trim()));
-                }
-                let b64 = String::from_utf8_lossy(&output.stdout).replace("\r", "").replace("\n", "").trim().to_string();
-                if b64.is_empty() {
-                    return Err(anyhow::anyhow!("PowerShell returned empty screenshot output"));
-                }
-                Ok(json!({ "base64": b64, "image_base64": b64, "format": "png" }))
-            }
-
-            #[cfg(not(target_os = "windows"))]
-            {
-                let mut cmd = Command::new("grim");
-                if std::env::var("WAYLAND_DISPLAY").is_err() {
-                    // Детектим сокет wayland в /run/user/<uid> или фоллбекаем на wayland-1
-                    let wayland_display = if std::path::Path::new("/run/user/1000/wayland-1").exists() {
-                        "wayland-1"
-                    } else if std::path::Path::new("/run/user/1000/wayland-0").exists() {
-                        "wayland-0"
-                    } else {
-                        "wayland-1"
-                    };
-                    cmd.env("WAYLAND_DISPLAY", wayland_display);
-                }
-                if std::env::var("XDG_RUNTIME_DIR").is_err() {
-                    let uid = dirs::data_dir()
-                        .and_then(|p| p.to_str().map(|s| s.to_string()))
-                        .unwrap_or_default();
-                    let uid_str = if uid.contains("1000") { "1000" } else { "1000" };
-                    cmd.env("XDG_RUNTIME_DIR", format!("/run/user/{}", uid_str));
-                }
-
-                let output = cmd.arg("-").output()?;
-                if !output.status.success() {
-                    let err_msg = String::from_utf8_lossy(&output.stderr);
-                    return Err(anyhow::anyhow!("grim screenshot failed: {}", err_msg.trim()));
-                }
-                let b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &output.stdout,
-                );
-                Ok(json!({ "base64": b64, "image_base64": b64, "format": "png" }))
-            }
+            let captured = crate::screen::capture_screen(&params).await?;
+            Ok(captured.to_json())
         }
 
         "display_control" => {
-            // Поддержка очереди действий (Actions Batch Queue)
-            if let Some(actions_list) = params.get("actions").and_then(|v| v.as_array()) {
-                let default_delay = params.get("default_delay_ms").and_then(|v| v.as_u64()).unwrap_or(50);
-                let mut executed = Vec::new();
+            let default_coord_space = params
+                .get("coord_space")
+                .and_then(|v| v.as_str())
+                .unwrap_or("physical");
+
+            let mut response = if let Some(actions_list) = params.get("actions").and_then(|v| v.as_array()) {
+                let default_delay = params
+                    .get("default_delay_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(50);
+                let mut executed = Vec::with_capacity(actions_list.len());
 
                 for item in actions_list {
-                    let sub_action = item.get("action").and_then(|v| v.as_str()).unwrap_or("click");
-                    let delay = item.get("delay_ms").and_then(|v| v.as_u64()).unwrap_or(default_delay);
+                    let sub_action = item
+                        .get("action")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("click");
+                    let delay = item
+                        .get("delay_ms")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(default_delay);
 
-                    match sub_action {
-                        "key" => {
-                            if let Some(key) = item.get("key").and_then(|v| v.as_str()) {
-                                #[cfg(target_os = "windows")]
-                                {
-                                    let win_key = crate::keys::normalize_windows_sendkeys(key);
-                                    let ps_cmd = format!("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')", win_key);
-                                    let _ = Command::new("powershell")
-                                        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-                                        .status();
-                                }
-                                #[cfg(not(target_os = "windows"))]
-                                {
-                                    if key.to_lowercase() == "super" || key.starts_with("niri:") {
-                                        let niri_cmd = key.trim_start_matches("niri:");
-                                        let _ = Command::new("niri").args(["msg", "action", niri_cmd]).status();
-                                    } else {
-                                        let _ = Command::new("ydotool").args(["key", key]).status();
-                                    }
-                                }
-                                executed.push(json!({ "action": "key", "key": key }));
-                            }
-                        }
-                        "click" => {
-                            let x = item.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
-                            let y = item.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
-                            #[cfg(target_os = "windows")]
-                            {
-                                let ps_cmd = format!(r#"Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void mouse_event(int flags, int dx, int dy, int cButtons, int extraInfo); [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);' -Name Mouse -Namespace Win32; [Win32.Mouse]::SetCursorPos({}, {}); [Win32.Mouse]::mouse_event(0x02, 0, 0, 0, 0); Start-Sleep -Milliseconds 40; [Win32.Mouse]::mouse_event(0x04, 0, 0, 0, 0)"#, x, y);
-                                let _ = Command::new("powershell")
-                                    .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-                                    .status();
-                            }
-                            #[cfg(not(target_os = "windows"))]
-                            {
-                                let _ = Command::new("ydotool")
-                                    .args(["mousemove", "--absolute", &x.to_string(), &y.to_string()])
-                                    .status();
-                                let _ = Command::new("ydotool").args(["click", "0xC0"]).status();
-                            }
-                            executed.push(json!({ "action": "click", "x": x, "y": y }));
-                        }
-                        "type" => {
-                            let text = item.get("text").and_then(|v| v.as_str()).unwrap_or_default();
-                            #[cfg(target_os = "windows")]
-                            {
-                                let escaped = text.replace("'", "''");
-                                let ps_cmd = format!("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')", escaped);
-                                let _ = Command::new("powershell")
-                                    .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-                                    .status();
-                            }
-                            #[cfg(not(target_os = "windows"))]
-                            {
-                                let _ = Command::new("ydotool").args(["type", text]).status();
-                            }
-                            executed.push(json!({ "action": "type", "text": text }));
-                        }
-                        _ => {}
-                    }
+                    let item_res =
+                        execute_cua_step(sub_action, item, default_coord_space, pointer).await?;
+                    executed.push(item_res);
 
-                    if delay > 0 {
-                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                    if delay > 0 && sub_action != "wait" && sub_action != "sleep" {
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
                     }
                 }
-                return Ok(json!({ "handled": true, "batch": true, "executed_count": executed.len(), "items": executed }));
+
+                json!({
+                    "handled": true,
+                    "batch": true,
+                    "executed_count": executed.len(),
+                    "items": executed,
+                })
+            } else {
+                let sub_action = params
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("click");
+                execute_cua_step(sub_action, &params, default_coord_space, pointer).await?
+            };
+
+            if let Some(cap_cfg) = params.get("capture_after") {
+                let should_capture = match cap_cfg {
+                    serde_json::Value::Bool(b) => *b,
+                    serde_json::Value::Object(_) => true,
+                    _ => false,
+                };
+                if should_capture {
+                    let delay_ms = cap_cfg
+                        .get("delay_ms")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(120)
+                        .min(10_000);
+                    if delay_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                    let screen_params = if cap_cfg.is_object() {
+                        cap_cfg.clone()
+                    } else {
+                        json!({})
+                    };
+                    let captured = crate::screen::capture_screen(&screen_params).await?;
+                    if let Some(obj) = response.as_object_mut() {
+                        obj.insert("screen".to_string(), captured.to_json());
+                    }
+                }
             }
 
-            let sub_action = params
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or("click");
-
-            match sub_action {
-                "key" => {
-                    let key = params
-                        .get("key")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| anyhow::anyhow!("Missing key"))?;
-
-                    #[cfg(target_os = "windows")]
-                    {
-                        let win_key = crate::keys::normalize_windows_sendkeys(key);
-                        let ps_cmd = format!("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')", win_key);
-                        let _ = Command::new("powershell")
-                            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-                            .spawn();
-                        Ok(json!({ "handled": true, "method": "windows_sendkeys", "key": key, "sendkeys_code": win_key }))
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        if key.to_lowercase() == "super" || key.starts_with("niri:") {
-                            let niri_cmd = key.trim_start_matches("niri:");
-                            let _ = Command::new("niri").args(["msg", "action", niri_cmd]).spawn();
-                            Ok(json!({ "handled": true, "method": "niri_msg", "key": key }))
-                        } else {
-                            let _ = Command::new("ydotool").args(["key", key]).spawn();
-                            Ok(json!({ "handled": true, "method": "ydotool", "key": key }))
-                        }
-                    }
-                }
-                "click" => {
-                    let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let btn = params.get("button").and_then(|v| v.as_str()).unwrap_or("left");
-                    let duration = params.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(200);
-
-                    #[cfg(target_os = "windows")]
-                    {
-                        let (down_flag, up_flag) = match btn {
-                            "right" => (0x08, 0x10),
-                            "middle" => (0x20, 0x40),
-                            _ => (0x02, 0x04),
-                        };
-                        let ps_cmd = format!(r#"Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void mouse_event(int flags, int dx, int dy, int cButtons, int extraInfo); [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);' -Name Mouse -Namespace Win32; [Win32.Mouse]::SetCursorPos({}, {}); [Win32.Mouse]::mouse_event({}, 0, 0, 0, 0); Start-Sleep -Milliseconds 40; [Win32.Mouse]::mouse_event({}, 0, 0, 0, 0)"#, x as i64, y as i64, down_flag, up_flag);
-                        let _ = Command::new("powershell")
-                            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-                            .spawn();
-                        Ok(json!({ "handled": true, "method": "windows_user32_click", "x": x, "y": y, "button": btn }))
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        if let Some(ptr) = pointer {
-                            // Smooth human-like Bezier move + Click!
-                            ptr.move_to(x, y, duration)?;
-                            ptr.click(btn)?;
-                            Ok(json!({ "handled": true, "method": "uinput_bezier", "x": x, "y": y, "button": btn }))
-                        } else {
-                            let rel_x = x as i32;
-                            let rel_y = y as i32;
-                            Ok(json!({ "handled": true, "method": "no_pointer_fallback", "x": rel_x, "y": rel_y }))
-                        }
-                    }
-                }
-                "move" => {
-                    let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let duration = params.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(250);
-
-                    #[cfg(target_os = "windows")]
-                    {
-                        let ps_cmd = format!(r#"Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);' -Name Mouse -Namespace Win32; [Win32.Mouse]::SetCursorPos({}, {});"#, x as i64, y as i64);
-                        let _ = Command::new("powershell")
-                            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-                            .spawn();
-                        Ok(json!({ "handled": true, "method": "windows_user32_move", "x": x, "y": y }))
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        if let Some(ptr) = pointer {
-                            ptr.move_to(x, y, duration)?;
-                            Ok(json!({ "handled": true, "method": "uinput_bezier_move", "x": x, "y": y }))
-                        } else {
-                            let rel_x = x as i32;
-                            let rel_y = y as i32;
-                            Ok(json!({ "handled": true, "method": "no_pointer_fallback", "x": rel_x, "y": rel_y }))
-                        }
-                    }
-                }
-                "type" => {
-                    let text = params
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-
-                    #[cfg(target_os = "windows")]
-                    {
-                        let escaped = text.replace("'", "''");
-                        let ps_cmd = format!("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')", escaped);
-                        let _ = Command::new("powershell")
-                            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-                            .spawn();
-                        Ok(json!({ "handled": true, "method": "windows_sendkeys", "text": text }))
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        let _ = Command::new("ydotool").args(["type", text]).spawn();
-                        Ok(json!({ "handled": true, "action": "type", "text": text }))
-                    }
-                }
-                _ => Ok(json!({ "handled": false, "error": "Unknown subaction" })),
-            }
+            Ok(response)
         }
 
         // ── 4. Sound & Audio Playback ───────────────────────────────
@@ -485,6 +834,14 @@ pub async fn execute_action(
             }
             Ok(json!({ "entries": entries }))
         }
+
+        "fs.stat" => crate::files::fs_stat(&params).await,
+
+        "fs.download" => crate::files::fs_download(&params).await,
+
+        "fs.upload" => crate::files::fs_upload(&params).await,
+
+        "fs.fetch" => crate::files::fs_fetch(&params).await,
 
         // ── 6. Hermes Desktop Sibling Synapse ───────────────────────
         #[cfg(feature = "hermes")]
@@ -602,29 +959,81 @@ pub async fn execute_action(
 
 #[cfg(feature = "hermes")]
 async fn send_to_hermes(prompt: &str, target_session: Option<&str>) -> Result<serde_json::Value> {
+    // Hermes 0.23+: the gateway no longer accepts `?token=` auth. Every dial mints a one-use
+    // session ticket over the private control socket and offers it as a subprotocol.
     let h = discover_hermes();
-    if !h.found || h.port.is_none() {
-        return Err(anyhow::anyhow!("Hermes not discovered on host"));
+    if !h.found {
+        return Err(anyhow::anyhow!("Hermes gateway not discovered on host (no control socket answer)"));
     }
-    let port = h.port.unwrap();
+    let api_origin = h
+        .api_origin
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Hermes gateway has no api_origin"))?;
+    let (profile_id, instance_id) = match (h.profile_id.clone(), h.instance_id.clone()) {
+        (Some(p), Some(i)) => (p, i),
+        _ => return Err(anyhow::anyhow!(
+            "Hermes gateway identity incomplete (profile_id/instance_id missing): a ticket cannot be minted"
+        )),
+    };
+
+    let mint = |profile: String, instance: String| async move {
+        tokio::task::spawn_blocking(move || crate::hermes::mint_ticket(&profile, &instance))
+            .await
+            .ok()
+            .flatten()
+    };
 
     let mut resolved_sid = target_session.map(|s| s.to_string());
+    let mut live_sid: Option<String> = None;
+
+    // A stored session is resumed on the same socket that later carries the turn.
+    let dial = |ticket: String, origin: String| async move {
+        let (url, protocols) = crate::hermes::gateway_ws_target(&origin, &ticket);
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut req = url.into_client_request()?;
+        req.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            protocols.parse().map_err(|_| anyhow::anyhow!("invalid subprotocol header"))?,
+        );
+        let (stream, _resp) = connect_async(req).await?;
+        Ok::<_, anyhow::Error>(stream)
+    };
+
+    let ticket = mint(profile_id.clone(), instance_id.clone())
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Hermes control socket refused to mint a session ticket"))?;
+    let mut ws_stream = dial(ticket, api_origin.clone()).await?;
+
+    // 1. No stored session named: pick the newest stored session over the socket.
     if resolved_sid.is_none() {
-        let client = reqwest::Client::new();
-        let mut req = client.get(format!("http://127.0.0.1:{}/api/sessions?limit=10", port));
-        if let Some(tok) = &h.token {
-            req = req.header("X-Hermes-Session-Token", tok);
-        }
-        if let Ok(resp) = req.send().await {
-            if let Ok(v) = resp.json::<serde_json::Value>().await {
-                if let Some(sessions) = v.get("sessions").and_then(|s| s.as_array()) {
-                    if let Some(first) = sessions
-                        .iter()
-                        .find(|s| s.get("is_active") == Some(&json!(true)))
-                        .or_else(|| sessions.first())
-                    {
-                        if let Some(id) = first.get("id").and_then(|i| i.as_str()) {
-                            resolved_sid = Some(id.to_string());
+        let list_rpc = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "session.list",
+            "params": { "scope": "stored", "limit": 10 }
+        });
+        ws_stream.send(Message::Text(list_rpc.to_string().into())).await?;
+        let list_timeout = tokio::time::sleep(Duration::from_millis(5000));
+        tokio::pin!(list_timeout);
+        loop {
+            tokio::select! {
+                _ = &mut list_timeout => { break; }
+                msg = ws_stream.next() => {
+                    if let Some(Ok(Message::Text(text))) = msg {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if parsed.get("id") == Some(&json!(9)) {
+                                if let Some(first) = parsed
+                                    .get("result")
+                                    .and_then(|r| r.get("sessions"))
+                                    .and_then(|s| s.as_array())
+                                    .and_then(|a| a.first())
+                                {
+                                    if let Some(id) = first.get("id").and_then(|i| i.as_str()) {
+                                        resolved_sid = Some(id.to_string());
+                                    }
+                                }
+                                break;
+                            }
                         }
                     }
                 }
@@ -632,16 +1041,7 @@ async fn send_to_hermes(prompt: &str, target_session: Option<&str>) -> Result<se
         }
     }
 
-    let ws_url = match &h.token {
-        Some(t) => format!("ws://127.0.0.1:{}/api/ws?token={}", port, urlencoding(t)),
-        None => format!("ws://127.0.0.1:{}/api/ws", port),
-    };
-
-    let (mut ws_stream, _) = connect_async(&ws_url).await?;
-
-    let mut live_sid = resolved_sid.clone();
-
-    // 1. If stored session specified, send session.resume and WAIT for response to get in-memory runtime session_id
+    // 2. If stored session specified, send session.resume and WAIT for response to get in-memory runtime session_id
     if let Some(sid) = &resolved_sid {
         let resume_rpc = json!({
             "jsonrpc": "2.0",
@@ -680,14 +1080,18 @@ async fn send_to_hermes(prompt: &str, target_session: Option<&str>) -> Result<se
         }
     }
 
-    // 2. Submit prompt with resolved live_sid
+    // 3. Submit the turn. `submission_id` is mandatory (it is the admission's idempotency key);
+    // `surface` is only accepted for 'hud'/'voice-live', so a plain device turn omits it entirely.
+    let turn_sid = live_sid.clone().or_else(|| resolved_sid.clone());
+    let submission_id = uuid_like();
     let submit_rpc = json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "prompt.submit",
         "params": {
-            "session_id": live_sid,
-            "text": format!("[Dirom Reqwest]\n{}", prompt)
+            "session_id": turn_sid,
+            "text": format!("[Dirom Reqwest]\n{}", prompt),
+            "submission_id": submission_id
         }
     });
 
@@ -709,14 +1113,14 @@ async fn send_to_hermes(prompt: &str, target_session: Option<&str>) -> Result<se
                             if let Some(err) = parsed.get("error") {
                                 return Err(anyhow::anyhow!("Hermes prompt.submit error: {}", err));
                             }
-                            let status = parsed.get("result")
-                                .and_then(|r| r.get("status"))
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("submitted");
+                            let result = parsed.get("result").cloned().unwrap_or(json!({}));
                             return Ok(json!({
                                 "ok": true,
-                                "status": status,
-                                "session_id": live_sid,
+                                "status": result.get("status").and_then(|s| s.as_str()).unwrap_or("submitted"),
+                                "admission_id": result.get("admission_id"),
+                                "sequence": result.get("sequence"),
+                                "submission_id": submission_id,
+                                "session_id": turn_sid,
                                 "stored_session_id": resolved_sid,
                             }));
                         }
@@ -728,21 +1132,63 @@ async fn send_to_hermes(prompt: &str, target_session: Option<&str>) -> Result<se
 
     Ok(json!({
         "ok": true,
-        "session_id": live_sid,
+        "session_id": turn_sid,
         "stored_session_id": resolved_sid,
-        "status": "queued_to_hermes"
+        "submission_id": submission_id,
+        "status": "queued_to_hermes_no_ack"
     }))
 }
 
-#[allow(dead_code)]
-fn urlencoding(s: &str) -> String {
-    let mut encoded = String::new();
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
-            encoded.push(b as char);
-        } else {
-            encoded.push_str(&format!("%{:02X}", b));
-        }
+/// A 32-hex-char submission id: the admission's idempotency key (any opaque string works,
+/// but it must be present — Hermes refuses `prompt.submit` without one).
+#[cfg(feature = "hermes")]
+fn uuid_like() -> String {
+    let a = rand::random::<u64>();
+    let b = rand::random::<u64>();
+    format!("{:016x}{:016x}", a, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_scroll_directions_and_deltas() {
+        assert_eq!(parse_scroll_deltas(&json!({ "direction": "up", "amount": 5 })), (0, 5));
+        assert_eq!(parse_scroll_deltas(&json!({ "direction": "down", "amount": 4 })), (0, -4));
+        assert_eq!(parse_scroll_deltas(&json!({ "direction": "left", "amount": 2 })), (-2, 0));
+        assert_eq!(parse_scroll_deltas(&json!({ "dx": 3, "dy": -7 })), (3, -7));
     }
-    encoded
+
+    #[tokio::test]
+    async fn executes_batch_wait_and_fs_actions() {
+        let cfg = DdbConfig::default();
+        let batch_res = execute_action(
+            "display_control",
+            json!({
+                "actions": [
+                    { "action": "wait", "ms": 5 },
+                    { "action": "sleep", "duration_ms": 5 }
+                ],
+                "default_delay_ms": 0
+            }),
+            &cfg,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(batch_res["handled"], true);
+        assert_eq!(batch_res["batch"], true);
+        assert_eq!(batch_res["executed_count"], 2);
+
+        let drag_err = execute_action(
+            "display_control",
+            json!({ "action": "drag", "x": 10, "y": 10 }),
+            &cfg,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(drag_err.to_string().contains("to_x / to_y"));
+    }
 }

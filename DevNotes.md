@@ -35,9 +35,15 @@
 2. **Безопасность (Permissions Matrix):**
    * Конфиг в `~/.config/ddb/config.json`.
    * Перед исполнением любого действия из `/action` проверяются флаги разрешений (`exec`, `hermes`, `fs.read`, `fs.write`, `display_control`, `screen`).
-3. **Hermes Bridge (`hermes.*`):**
-   * Нативный автопоиск Hermes через `/proc` (Linux) / список процессов (Windows): чтение cmdline `hermes serve`, извлечение токена `HERMES_DASHBOARD_SESSION_TOKEN` и порта.
-   * Автоматический WebSocket коннект с поддержкой протокола `session.resume` -> `prompt.submit` с маркером `[Dirom Reqwest]`.
+3. **Hermes Bridge (`hermes.*`) — Hermes 0.23+ ticket protocol:**
+   * Автопоиск — через `identify` на приватном control-сокете `~/.hermes/gateway.sock` (fallback: `gateway_state.json` + `/proc`). Даёт `api_origin`, `instance_id`, `profile_id`, `state`, `code_version`.
+   * **Внимание:** `?token=` в URL и HTTP-заголовок `X-Hermes-Session-Token` больше НЕ работают (403). Токен из env/state-файла не нужен и не используется.
+   * Каждый диа́л: `{"protocol":1,"verb":"session-ticket","params":{profile_id, instance_id, purpose:"interactive"}}` на control-сокете → одноразовый тикет (~30с).
+   * WebSocket: `ws://<api_origin>/api/ws` с subprotocols `hermes-gateway-v1, hermes-gateway-ticket.<ticket>`; сервер отражает только `hermes-gateway-v1`.
+   * Последовательность: `session.list {scope:"stored"}` (если сессия не задана) → `session.resume {session_id, source:"desktop", omit_messages:true}` (берём runtime `session_id` из ответа) → `prompt.submit {session_id, text, submission_id}`.
+   * **`submission_id` обязателен** (idempotency-key допуска); `surface` допустим ТОЛЬКО как `hud` / `voice-live` — иначе `invalid_params` (4001).
+   * Ответ `prompt.submit`: `{admission_id, status:"queued", sequence, ref}`. Финальный результат хода — через `prompt.receipt {session_id, admission_id, include_result:true}` (`status: terminal`, `outcome: completed`, `result.final_response`).
+   * Маркер `[Dirom Reqwest]` остаётся в тексте первого сообщения.
 
 ---
 
@@ -90,8 +96,8 @@
 * **`device.fs.list(path='.', name='ponosik')`** — просмотр содержимого директорий с размерами и типами.
 
 ### 4.5. Hermes Sibling Synapse (Связь с Братом Гермесом)
-* **`device.hermes_chats(name='ponosik')`** (`action: "hermes.sessions"`) — список сессий и чатов в запущенном на хосте Hermes Desktop через REST API.
-* **`device.hermes_send(prompt, session_id="", name='ponosik')`** (`action: "hermes.send"`) — отправка задачи брату Гермесу через нативный WebSocket (`tokio-tungstenite`) с двухфазным `session.resume` -> `prompt.submit` и маркером `[Dirom Reqwest]`.
+* **`device.hermes_chats(name='ponosik')`** (`action: "hermes.sessions"`) — список сессий и чатов Hermes на хосте (прямое read-only чтение `~/.hermes/state.db`).
+* **`device.hermes_send(prompt, session_id="", name='ponosik')`** (`action: "hermes.send"`) — отправка задачи брату Гермесу через нативный WebSocket (`tokio-tungstenite`): control-socket тикет → `session.resume` → `prompt.submit` c `submission_id` и маркером `[Dirom Reqwest]`. Возвращает `admission_id` + `sequence` для отслеживания через `prompt.receipt`.
 
 ---
 

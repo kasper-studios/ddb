@@ -134,33 +134,88 @@ impl DdbConfig {
             return p.hermes;
         }
         if action.starts_with("fs.") {
-            if action == "fs.read" {
-                return p.fs.read;
-            }
-            if action == "fs.write" {
-                return p.fs.write;
-            }
-            if action == "fs.list" {
-                return p.fs.list;
-            }
-            return false;
+            return match action {
+                "fs.read" | "fs.download" | "fs.stat" => p.fs.read,
+                "fs.write" | "fs.upload" | "fs.fetch" => p.fs.write,
+                "fs.list" => p.fs.list,
+                _ => false,
+            };
         }
         if action == "display_control" {
             if !p.display_control.enabled {
                 return false;
             }
+            let wants_capture_after = match params.get("capture_after") {
+                Some(serde_json::Value::Bool(b)) => *b,
+                Some(serde_json::Value::Object(_)) => true,
+                _ => false,
+            };
+            if wants_capture_after && !p.screen {
+                return false;
+            }
+            if let Some(actions) = params.get("actions").and_then(|v| v.as_array()) {
+                return actions.iter().all(|item| {
+                    let sub = item
+                        .get("action")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("click");
+                    is_display_subaction_permitted(p, sub)
+                });
+            }
             if let Some(sub) = params.get("action").and_then(|v| v.as_str()) {
-                match sub {
-                    "click" => return p.display_control.allow_click,
-                    "type" => return p.display_control.allow_type,
-                    "key" => return p.display_control.allow_keys,
-                    _ => return true,
-                }
+                return is_display_subaction_permitted(p, sub);
             }
             return true;
         }
 
         // Default allowed for benign status/info actions
         true
+    }
+}
+
+fn is_display_subaction_permitted(p: &PermissionsConfig, sub: &str) -> bool {
+    match sub {
+        "click" | "double_click" | "triple_click" | "right_click" | "middle_click"
+        | "move" | "mouse_down" | "mouse_up" | "drag" | "scroll" => {
+            p.display_control.allow_click
+        }
+        "type" => p.display_control.allow_type,
+        "key" => p.display_control.allow_keys,
+        "screen" | "screenshot" => p.screen,
+        "wait" | "sleep" => true,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn enforces_fs_and_batch_display_permissions() {
+        let mut cfg = DdbConfig::default();
+        cfg.permissions.fs.read = false;
+        cfg.permissions.fs.write = true;
+        assert!(!cfg.is_action_permitted("fs.download", &json!({})));
+        assert!(!cfg.is_action_permitted("fs.stat", &json!({})));
+        assert!(cfg.is_action_permitted("fs.upload", &json!({})));
+        assert!(cfg.is_action_permitted("fs.fetch", &json!({})));
+
+        cfg.permissions.display_control.allow_click = false;
+        assert!(!cfg.is_action_permitted(
+            "display_control",
+            &json!({ "actions": [{ "action": "key", "key": "a" }, { "action": "scroll", "dy": -3 }] })
+        ));
+        assert!(cfg.is_action_permitted(
+            "display_control",
+            &json!({ "actions": [{ "action": "key", "key": "a" }, { "action": "wait", "ms": 50 }] })
+        ));
+
+        cfg.permissions.screen = false;
+        assert!(!cfg.is_action_permitted(
+            "display_control",
+            &json!({ "action": "key", "key": "enter", "capture_after": true })
+        ));
     }
 }

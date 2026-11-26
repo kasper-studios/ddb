@@ -1,11 +1,13 @@
 mod actions;
 mod cloud;
 mod config;
+mod files;
 #[cfg(feature = "hermes")]
 mod hermes;
 pub mod keys;
 pub mod logger;
 mod pointer;
+mod screen;
 mod server;
 mod tui;
 mod tunnel;

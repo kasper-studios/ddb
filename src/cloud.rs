@@ -187,6 +187,10 @@ pub async fn run_cloud_loop(
                     "fs.read",
                     "fs.write",
                     "fs.list",
+                    "fs.stat",
+                    "fs.download",
+                    "fs.upload",
+                    "fs.fetch",
                 ];
                 #[cfg(feature = "hermes")]
                 {
